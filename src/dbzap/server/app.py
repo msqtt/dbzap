@@ -1,11 +1,14 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, AsyncIterator
 
 import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from dbzap.auth.dependencies import make_get_current_user
@@ -22,6 +25,7 @@ from dbzap.server.middleware import PerformanceMiddleware
 logger: Any = structlog.get_logger(__name__)
 
 _INTERNAL_TABLES = {"_users"}
+_STATIC_DIR = Path(__file__).parent / "static"
 
 
 async def create_app(settings: Settings | None = None) -> FastAPI:
@@ -90,5 +94,12 @@ async def create_app(settings: Settings | None = None) -> FastAPI:
         gql_gen = GraphqlApiGenerator(engine=engine)
         schema = gql_gen.generate(tables)
         gql_gen.mount(app, schema)
+
+    if cfg.enable_explorer and _STATIC_DIR.exists():
+        app.mount("/explorer/static", StaticFiles(directory=_STATIC_DIR), name="explorer-static")
+
+        @app.get("/explorer", response_class=FileResponse, include_in_schema=False)
+        async def explorer_index() -> FileResponse:
+            return FileResponse(_STATIC_DIR / "index.html")
 
     return app

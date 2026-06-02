@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>dbzap Explorer</title>
+  <link rel="stylesheet" href="/explorer/static/css/style.css" />
+  <link rel="stylesheet" href="/explorer/static/css/dashboard.css" />
+</head>
+<body>
+  <!-- Login overlay -->
+  <div id="login-overlay" class="overlay">
+    <div class="login-card">
+      <h1 class="login-title">dbzap</h1>
+      <p class="login-subtitle">API Explorer</p>
+      <form id="login-form">
+        <div class="field">
+          <label for="username">Username</label>
+          <input id="username" type="text" autocomplete="username" required />
+        </div>
+        <div class="field">
+          <label for="password">Password</label>
+          <input id="password" type="password" autocomplete="current-password" required />
+        </div>
+        <div id="login-error" class="error-msg hidden"></div>
+        <button type="submit" id="login-btn" class="btn btn-primary btn-full">Sign in</button>
+      </form>
+      <div id="token-expiry" class="token-expiry hidden"></div>
+    </div>
+  </div>
+
+  <!-- Main app (hidden until logged in) -->
+  <div id="app" class="hidden">
+    <!-- Top navigation -->
+    <nav class="topnav">
+      <div class="topnav-left">
+        <span class="brand">dbzap</span>
+        <button id="tab-explorer" class="tab-btn active" data-tab="explorer">API Explorer</button>
+        <button id="tab-dashboard" class="tab-btn" data-tab="dashboard">Dashboard</button>
+      </div>
+      <div class="topnav-right">
+        <span id="health-dot" class="status-dot" title="Service health"></span>
+        <span id="current-user" class="user-label"></span>
+        <button id="logout-btn" class="btn btn-ghost">Logout</button>
+      </div>
+    </nav>
+
+    <!-- Explorer view -->
+    <div id="view-explorer" class="view">
+      <aside class="sidebar">
+        <div class="sidebar-search">
+          <input id="endpoint-search" type="search" placeholder="Search endpoints..." />
+        </div>
+        <div id="sidebar-content" class="sidebar-list"></div>
+      </aside>
+      <main class="explorer-main">
+        <div id="request-panel" class="panel">
+          <div id="request-empty" class="empty-state">
+            <p>Select an endpoint from the sidebar to get started.</p>
+          </div>
+          <div id="request-builder" class="hidden">
+            <div class="request-line">
+              <span id="req-method-badge" class="method-badge"></span>
+              <span id="req-path-display" class="req-path"></span>
+            </div>
+            <div id="path-params-section" class="param-section hidden">
+              <h3>Path Parameters</h3>
+              <div id="path-params"></div>
+            </div>
+            <div id="query-params-section" class="param-section hidden">
+              <h3>Query Parameters</h3>
+              <div id="query-params"></div>
+            </div>
+            <div id="headers-section" class="param-section">
+              <h3>Headers</h3>
+              <div id="headers-editor"></div>
+            </div>
+            <div id="body-section" class="param-section hidden">
+              <h3>Request Body</h3>
+              <textarea id="body-editor" rows="8" placeholder="{}"></textarea>
+              <div class="body-actions">
+                <button id="format-body-btn" class="btn btn-ghost btn-sm">Format JSON</button>
+                <span id="body-error" class="error-msg hidden"></span>
+              </div>
+            </div>
+            <div class="send-bar">
+              <button id="send-btn" class="btn btn-primary">Send</button>
+            </div>
+          </div>
+        </div>
+        <div id="response-panel" class="panel hidden">
+          <div class="response-header">
+            <span id="resp-status-badge" class="status-badge"></span>
+            <span id="resp-time" class="resp-time"></span>
+            <button id="toggle-resp-headers" class="btn btn-ghost btn-sm">Headers</button>
+          </div>
+          <div id="resp-headers-section" class="resp-headers hidden"></div>
+          <pre id="resp-body" class="resp-body"></pre>
+          <div id="resp-truncated" class="truncated-banner hidden">
+            Response truncated. <button id="show-full-resp" class="btn btn-ghost btn-sm">Show full</button>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <!-- Dashboard view -->
+    <div id="view-dashboard" class="view hidden">
+      <div class="dashboard-toolbar">
+        <span class="toolbar-label">Auto-refresh: 5s</span>
+        <button id="pause-btn" class="btn btn-ghost btn-sm">Pause</button>
+        <span id="metrics-error-banner" class="error-banner hidden">Metrics unavailable — retrying…</span>
+      </div>
+
+      <!-- Row 1: Service status -->
+      <section class="dash-section">
+        <h2>Service Status</h2>
+        <div class="cards-row" id="status-cards"></div>
+      </section>
+
+      <!-- Row 2: HTTP overview -->
+      <section class="dash-section">
+        <h2>HTTP Overview</h2>
+        <div class="cards-row" id="http-cards"></div>
+      </section>
+
+      <!-- Row 3: Per-endpoint table -->
+      <section class="dash-section">
+        <h2>Per-Endpoint Stats</h2>
+        <div class="table-toolbar">
+          <input id="endpoint-table-search" type="search" placeholder="Filter by path…" />
+          <span id="endpoint-table-sort-hint" class="sort-hint">Click column header to sort</span>
+        </div>
+        <div class="table-wrap">
+          <table id="endpoint-table" class="data-table">
+            <thead>
+              <tr>
+                <th data-col="path" class="sortable">Path</th>
+                <th data-col="method" class="sortable">Method</th>
+                <th data-col="requests" class="sortable">Requests</th>
+                <th data-col="errors" class="sortable">Errors</th>
+                <th data-col="p50" class="sortable">p50 (ms)</th>
+                <th data-col="p95" class="sortable">p95 (ms)</th>
+                <th data-col="p99" class="sortable">p99 (ms)</th>
+                <th data-col="avg" class="sortable">Avg (ms)</th>
+              </tr>
+            </thead>
+            <tbody id="endpoint-table-body"></tbody>
+          </table>
+          <div id="endpoint-table-empty" class="empty-state hidden">No data yet</div>
+        </div>
+      </section>
+
+      <!-- Row 4: Database health -->
+      <section class="dash-section">
+        <h2>Database Health</h2>
+        <div id="db-health-cards" class="cards-row"></div>
+        <div id="slow-queries-wrap" class="slow-queries"></div>
+      </section>
+
+      <!-- Row 5: Sparklines -->
+      <section class="dash-section">
+        <h2>Trends (last ~5 min)</h2>
+        <div class="sparklines-row">
+          <div class="sparkline-card">
+            <span class="sparkline-label">Request Rate (req/s)</span>
+            <canvas id="spark-req-rate" width="200" height="60"></canvas>
+          </div>
+          <div class="sparkline-card">
+            <span class="sparkline-label">Error Rate (%)</span>
+            <canvas id="spark-error-rate" width="200" height="60"></canvas>
+          </div>
+          <div class="sparkline-card">
+            <span class="sparkline-label">p95 Latency (ms)</span>
+            <canvas id="spark-p95" width="200" height="60"></canvas>
+          </div>
+          <div class="sparkline-card">
+            <span class="sparkline-label">Pool Utilization (%)</span>
+            <canvas id="spark-pool" width="200" height="60"></canvas>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script type="module" src="/explorer/static/js/app.js"></script>
+</body>
+</html>
