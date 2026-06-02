@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 
 import structlog
@@ -6,12 +7,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from dbzap.auth.dependencies import make_get_current_user
 from dbzap.auth.routes import create_auth_router
 from dbzap.auth.user_store import UserStore
 from dbzap.core.config import Settings, get_settings
 from dbzap.core.introspector import SchemaIntrospector
 from dbzap.generators.graphql import GraphqlApiGenerator
 from dbzap.generators.rest import RestApiGenerator
+from dbzap.server.health import HealthCheck, create_health_router
 
 logger: Any = structlog.get_logger(__name__)
 
@@ -49,6 +52,20 @@ async def create_app(settings: Settings | None = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    get_current_user = make_get_current_user(store=store, settings=cfg)
+
+    health = HealthCheck(
+        engine=engine,
+        introspector=introspector,
+        start_time=datetime.now(timezone.utc),
+    )
+    health_router = create_health_router(
+        health=health,
+        api_mode=cfg.api_mode,
+        get_current_user=get_current_user,
+    )
+    app.include_router(health_router)
 
     auth_router = create_auth_router(store=store, settings=cfg)
     app.include_router(auth_router)
