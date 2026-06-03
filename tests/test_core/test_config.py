@@ -44,20 +44,30 @@ class TestSettingsLoading:
         assert s.db_pool_recycle == 1800
         assert s.db_statement_timeout == "5s"
 
-    def test_missing_database_url_raises(self):
+    def test_missing_database_url_raises(self, monkeypatch):
         from dbzap.core.config import Settings
+        from pydantic_settings import SettingsConfigDict
 
+        class TestSettings(Settings):
+            model_config = SettingsConfigDict(env_file=None)
+
+        monkeypatch.delenv("DATABASE_URL", raising=False)
         with pytest.raises(ValidationError) as exc_info:
-            Settings(jwt_secret_key="secret")  # type: ignore[call-arg]
+            TestSettings(jwt_secret_key="secret")  # type: ignore[call-arg]
         errors = exc_info.value.errors()
         fields = {e["loc"][0] for e in errors}
         assert "database_url" in fields
 
-    def test_missing_jwt_secret_key_raises(self):
+    def test_missing_jwt_secret_key_raises(self, monkeypatch):
         from dbzap.core.config import Settings
+        from pydantic_settings import SettingsConfigDict
 
+        class TestSettings(Settings):
+            model_config = SettingsConfigDict(env_file=None)
+
+        monkeypatch.delenv("JWT_SECRET_KEY", raising=False)
         with pytest.raises(ValidationError) as exc_info:
-            Settings(database_url="postgresql+asyncpg://u:p@h/d")  # type: ignore[call-arg]
+            TestSettings(database_url="postgresql+asyncpg://u:p@h/d")  # type: ignore[call-arg]
         errors = exc_info.value.errors()
         fields = {e["loc"][0] for e in errors}
         assert "jwt_secret_key" in fields

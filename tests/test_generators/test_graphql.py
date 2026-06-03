@@ -1,7 +1,6 @@
-"""Tests for GraphQL API generator (spec: 05-graphql-api-generator.md)."""
+"""Tests for GraphQL API generator (spec: 05-graphql-api-generator.md, 09-graphql-relay-filtering.md)."""
 from __future__ import annotations
 
-import json
 from collections.abc import AsyncGenerator
 
 import pytest
@@ -133,48 +132,125 @@ class TestSchemaStructure:
         paths = {r.path for r in app.routes}  # type: ignore[attr-defined]
         assert any("/graphql" in p for p in paths)
 
+    def test_relay_connection_types_exist(self, generator: GraphqlApiGenerator, tables: list[TableInfo]) -> None:
+        schema = generator.generate(tables)
+        schema_str = str(schema)
+        assert "PageInfo" in schema_str
+        assert "UsersConnection" in schema_str
+        assert "UsersEdge" in schema_str
+        assert "UsersFilter" in schema_str
+
 
 # ---------------------------------------------------------------------------
-# Query – list
+# Query – list (Relay Connection)
 # ---------------------------------------------------------------------------
 
 
 class TestListQuery:
     async def test_list_users_returns_empty_initially(self, client: AsyncClient) -> None:
-        result = await _gql(client, "{ users { items { id name email } } }")
+        result = await _gql(client, "{ users { edges { node { id name email } } } }")
         assert result.get("errors") is None
-        assert result["data"]["users"]["items"] == []
+        assert result["data"]["users"]["edges"] == []
 
     async def test_list_users_returns_inserted_rows(self, client: AsyncClient) -> None:
         await _gql(
             client,
-            "mutation { createUsers(input: { name: \"Alice\", email: \"a@x.com\" }) { id } }",
+            'mutation { createUsers(input: { name: "Alice", email: "a@x.com" }) { id } }',
         )
-        result = await _gql(client, "{ users { items { name } } }")
-        assert result["data"]["users"]["items"][0]["name"] == "Alice"
+        result = await _gql(client, "{ users { edges { node { name } } } }")
+        assert result["data"]["users"]["edges"][0]["node"]["name"] == "Alice"
 
-    async def test_list_pagination_page_size(self, client: AsyncClient) -> None:
+    async def test_list_pagination_first(self, client: AsyncClient) -> None:
         for i in range(5):
             await _gql(
                 client,
                 f'mutation {{ createUsers(input: {{ name: "U{i}", email: "u{i}@x.com" }}) {{ id }} }}',
             )
-        result = await _gql(client, "{ users(pageSize: 2) { items { id } } }")
-        assert len(result["data"]["users"]["items"]) == 2
+        result = await _gql(client, "{ users(first: 2) { edges { node { id } } pageInfo { hasNextPage } } }")
+        assert len(result["data"]["users"]["edges"]) == 2
+        assert result["data"]["users"]["pageInfo"]["hasNextPage"] is True
 
-    async def test_list_pagination_page(self, client: AsyncClient) -> None:
+    async def test_list_pagination_forward_with_after(self, client: AsyncClient) -> None:
         for i in range(4):
             await _gql(
                 client,
                 f'mutation {{ createUsers(input: {{ name: "U{i}", email: "off{i}@x.com" }}) {{ id }} }}',
             )
-        all_rows = (await _gql(client, "{ users(pageSize: 4) { items { id } } }"))["data"]["users"]["items"]
-        page2 = (await _gql(client, "{ users(pageSize: 2, page: 2) { items { id } } }"))["data"]["users"]["items"]
-        assert page2[0]["id"] == all_rows[2]["id"]
+        all_edges = (
+            await _gql(client, "{ users(first: 4) { edges { node { id } cursor } pageInfo { hasNextPage } } }")
+        )["data"]["users"]["edges"]
+        cursor = all_edges[1]["cursor"]
+        result = await _gql(
+            client,
+            f'{{ users(first: 2, after: "{cursor}") {{ edges {{ node {{ id }} }} }} }}',
+        )
+        edges = result["data"]["users"]["edges"]
+        assert edges[0]["node"]["id"] == all_edges[2]["node"]["id"]
 
-    async def test_list_page_size_clamped_to_100(self, client: AsyncClient) -> None:
-        result = await _gql(client, "{ users(pageSize: 9999) { items { id } } }")
+    async def test_list_first_clamped_to_100(self, client: AsyncClient) -> None:
+        result = await _gql(client, "{ users(first: 9999) { edges { node { id } } } }")
         assert result.get("errors") is None
+
+    async def test_list_total_count(self, client: AsyncClient) -> None:
+        for i in range(3):
+            await _gql(
+                client,
+                f'mutation {{ createUsers(input: {{ name: "T{i}", email: "t{i}@x.com" }}) {{ id }} }}',
+            )
+        result = await _gql(client, "{ users { totalCount edges { node { id } } } }")
+        assert result["data"]["users"]["totalCount"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Query – filtering
+# ---------------------------------------------------------------------------
+
+
+class TestListFiltering:
+    async def test_filter_by_eq(self, client: AsyncClient) -> None:
+        for i in range(3):
+            await _gql(
+                client,
+                f'mutation {{ createUsers(input: {{ name: "F{i}", email: "f{i}@x.com" }}) {{ id }} }}',
+            )
+        result = await _gql(
+            client,
+            '{ users(filter: { name: { eq: "F1" } }) { edges { node { name } } } }',
+        )
+        assert len(result["data"]["users"]["edges"]) == 1
+        assert result["data"]["users"]["edges"][0]["node"]["name"] == "F1"
+
+    async def test_filter_by_contains(self, client: AsyncClient) -> None:
+        await _gql(
+            client,
+            'mutation { createUsers(input: { name: "Alice Wonderland", email: "alice@x.com" }) { id } }',
+        )
+        await _gql(
+            client,
+            'mutation { createUsers(input: { name: "Bob", email: "bob@x.com" }) { id } }',
+        )
+        result = await _gql(
+            client,
+            '{ users(filter: { name: { contains: "Wonder" } }) { edges { node { name } } } }',
+        )
+        assert len(result["data"]["users"]["edges"]) == 1
+        assert result["data"]["users"]["edges"][0]["node"]["name"] == "Alice Wonderland"
+
+    async def test_search_across_string_columns(self, client: AsyncClient) -> None:
+        await _gql(
+            client,
+            'mutation { createUsers(input: { name: "Charlie", email: "charlie@test.com" }) { id } }',
+        )
+        await _gql(
+            client,
+            'mutation { createUsers(input: { name: "Dana", email: "dana@other.com" }) { id } }',
+        )
+        result = await _gql(
+            client,
+            '{ users(search: "charlie") { edges { node { name } } } }',
+        )
+        assert len(result["data"]["users"]["edges"]) == 1
+        assert result["data"]["users"]["edges"][0]["node"]["name"] == "Charlie"
 
 
 # ---------------------------------------------------------------------------
@@ -351,9 +427,9 @@ class TestNoPkTable:
         assert result["data"]["createAuditLog"]["message"] == "hello"
 
     async def test_no_pk_list(self, client: AsyncClient) -> None:
-        result = await _gql(client, "{ auditLog { items { message } } }")
+        result = await _gql(client, "{ auditLog { edges { node { message } } } }")
         assert result.get("errors") is None
-        assert isinstance(result["data"]["auditLog"]["items"], list)
+        assert isinstance(result["data"]["auditLog"]["edges"], list)
 
     def test_no_pk_no_byid_field(self, generator: GraphqlApiGenerator, tables: list[TableInfo]) -> None:
         schema = generator.generate(tables)
