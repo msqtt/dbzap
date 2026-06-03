@@ -1,13 +1,14 @@
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any
 
 import structlog
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from dbzap.auth.dependencies import make_get_current_user
@@ -61,10 +62,23 @@ async def create_app(settings: Settings | None = None) -> FastAPI:
     # PerformanceMiddleware must come before GZip to measure uncompressed time
     app.add_middleware(PerformanceMiddleware, collector=collector)
     app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+    # CORS: defensively coerce credentials=False when origin is wildcard.
+    # The W3C CORS spec forbids `Access-Control-Allow-Origin: *` together
+    # with `Access-Control-Allow-Credentials: true` and modern browsers
+    # reject such responses. See specs/07-server-bootstrap.md.
+    cors_origins = list(cfg.cors_origins)
+    cors_allow_credentials = cfg.cors_allow_credentials
+    if "*" in cors_origins and cors_allow_credentials:
+        logger.warning(
+            "cors_credentials_coerced_off",
+            reason="wildcard origin is incompatible with credentials=True",
+        )
+        cors_allow_credentials = False
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
+        allow_origins=cors_origins,
+        allow_credentials=cors_allow_credentials,
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -74,7 +88,7 @@ async def create_app(settings: Settings | None = None) -> FastAPI:
     health = HealthCheck(
         engine=engine,
         introspector=introspector,
-        start_time=datetime.now(timezone.utc),
+        start_time=datetime.now(UTC),
     )
     health_router = create_health_router(
         health=health,
@@ -126,7 +140,7 @@ async def create_app(settings: Settings | None = None) -> FastAPI:
     ]
 
     @app.get("/openapi.json", include_in_schema=False)
-    async def openapi_with_auth(user: UserRecord = Depends(get_current_user)) -> JSONResponse:  # type: ignore[misc]
+    async def openapi_with_auth(user: UserRecord = Depends(get_current_user)) -> JSONResponse:
         return JSONResponse(original_openapi())
 
     return app

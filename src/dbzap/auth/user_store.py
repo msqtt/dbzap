@@ -1,4 +1,15 @@
-from sqlalchemy import Column, DateTime, Integer, MetaData, String, Table, func, insert, select, update
+from sqlalchemy import (
+    Column,
+    DateTime,
+    Integer,
+    MetaData,
+    String,
+    Table,
+    func,
+    insert,
+    select,
+    update,
+)
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from dbzap.auth.models import UserRecord

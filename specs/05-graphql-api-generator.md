@@ -1,5 +1,23 @@
 # Feature: GraphQL API Generator
 
+> **⚠️ Status: Partially superseded.** Pagination and filter input shapes
+> documented below have been **replaced** by the Relay Connection model
+> defined in `09-graphql-relay-filtering.md`. The current implementation:
+>
+> - Returns `<Tbl>Connection { edges, pageInfo, totalCount }` — NOT
+>   `<Tbl>Pagination { items, page, pageSize, total, pages }`.
+> - Accepts `(first, after, last, before, filter, search)` — NOT
+>   `(page, pageSize)`.
+>
+> Sections retained from this spec (still authoritative):
+> - Generator interface (`GraphqlApiGenerator.generate` / `mount`)
+> - CRUD mutation shapes (`createUsers`, `updateUsers`, `deleteUsers`)
+> - Edge cases for tables without PK / composite PK
+> - SQL → GraphQL type mapping table at the bottom
+>
+> When in doubt, prefer 09. Anything in this file that contradicts 09 is
+> historical and pending removal.
+
 ## Goal
 Given an introspected database schema, dynamically generate a Strawberry GraphQL schema with Query and Mutation types providing CRUD operations for every table.
 
@@ -75,12 +93,14 @@ No new tables. Operates on introspected tables using SQLAlchemy Core (async).
 
 ## Edge Cases
 - Table with no primary key: skip `byId` query, `update`, and `delete` mutations. Log a warning.
-- Table with composite primary key: `byId` query takes multiple arguments (one per PK column).
+- Table with composite primary key: `byId` query takes multiple arguments (one per PK column). The argument type for each PK column MUST follow that column's mapped Python type (e.g. an `int` PK becomes `Int!`, a `varchar` PK becomes `String!`). The implementation MUST NOT hard-code `Int!` for every PK column.
 - Column with SQL default: exclude from create input type.
 - Column with NOT NULL and no default: required (`!`) in create input.
 - Empty database (zero tables): generate a schema with a placeholder `Query` type (Strawberry requires at least one field).
 - GraphQL type name collision (e.g. table named `query`): prefix with `Tbl_` to avoid conflicts with reserved GraphQL type names.
 - `JSON`/`JSONB` columns: map to `str` (JSON-serialized) in GraphQL, since Strawberry doesn't have a built-in JSON scalar by default. Register `scalars.JSON` if available.
+- **Generator isolation**: each call to `generate(...)` MUST produce a fully independent set of GraphQL types. The generator MUST NOT register the dynamically-created classes into `sys.modules[__name__].__dict__` or any other process-wide namespace, because doing so causes successive calls (different table sets, multiple test fixtures, multi-tenant setups) to bleed into each other and silently overwrite types with the same name. Resolver bodies that need type lookup must close over a per-call namespace dict instead.
+- **Cursor encoding**: cursors carry the row's primary-key values base64-encoded. The encoder MUST handle non-JSON-native PK types (`datetime`, `date`, `UUID`, `Decimal`, `bytes`) by stringifying them; otherwise tables keyed on those types crash on every list query.
 
 ## Acceptance Criteria
 - [ ] GraphQL type generated for each table with all columns as fields.

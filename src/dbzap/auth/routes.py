@@ -3,7 +3,7 @@ from pydantic import BaseModel
 
 from dbzap.auth.dependencies import make_get_current_user
 from dbzap.auth.models import UserRecord
-from dbzap.auth.passwords import verify_password
+from dbzap.auth.passwords import get_dummy_hash, verify_password
 from dbzap.auth.tokens import create_access_token
 from dbzap.auth.user_store import UserStore
 from dbzap.core.config import Settings
@@ -39,7 +39,13 @@ def create_auth_router(*, store: UserStore, settings: Settings) -> APIRouter:
                 headers={"WWW-Authenticate": "Bearer"},
             )
             user = await store.get_by_username(body.username)
-            if user is None or not verify_password(body.password, user.password_hash):
+            if user is None:
+                # Constant-time path: still pay the bcrypt cost so an
+                # attacker can't tell unknown user from wrong password
+                # via response timing (specs/06-auth.md).
+                verify_password(body.password, get_dummy_hash())
+                raise _invalid
+            if not verify_password(body.password, user.password_hash):
                 raise _invalid
             token = create_access_token(
                 {"sub": str(user.id)},

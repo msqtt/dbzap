@@ -62,7 +62,7 @@ class PerformanceMiddleware(BaseHTTPMiddleware):
         for route in routes:
             try:
                 match, _ = route.matches(request.scope)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 continue
             if match == Match.FULL:
                 fallback_path = getattr(route, "path", raw)

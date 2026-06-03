@@ -1,6 +1,6 @@
 import asyncio
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends
@@ -9,18 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from dbzap.core.introspector import SchemaIntrospector
 
-_START_MONOTONIC = time.monotonic()
-_START_WALL = datetime.now(timezone.utc)
-
 _VERSION = "0.1.0"
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _uptime() -> float:
-    return round(time.monotonic() - _START_MONOTONIC, 3)
+    return datetime.now(UTC).isoformat()
 
 
 class HealthCheck:
@@ -89,10 +82,11 @@ class HealthCheck:
         try:
             tables = self._introspector.get_cached_schema()
             table_count = len(tables)
-            last_reload = _now_iso()
         except RuntimeError:
             table_count = 0
-            last_reload = None
+
+        last_reload_at = self._introspector.last_reload_at
+        last_reload = last_reload_at.isoformat() if last_reload_at is not None else None
 
         return {
             "status": "ok",
@@ -125,7 +119,6 @@ def create_health_router(
 
     @router.get("/ready")
     async def readiness() -> Any:
-        from fastapi import Response
         from fastapi.responses import JSONResponse
 
         status_code, body = await health.readiness()

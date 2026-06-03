@@ -4,8 +4,8 @@
 Connect to a database, read its DDL, and produce a structured in-memory representation of all tables, columns, types, constraints, and relationships.
 
 ## Scope
-- In scope: PostgreSQL (via asyncpg), SQLite (via aiosqlite for testing), table listing, column metadata (name, type, nullable, default, primary key), unique constraints, foreign keys, indexes
-- Out of scope: MySQL, MariaDB, Oracle, MSSQL, views, stored procedures, triggers, partitions, schema-level permissions
+- In scope: PostgreSQL (via asyncpg), MySQL/MariaDB (via aiomysql), SQLite (via aiosqlite for testing), table listing, column metadata (name, type, nullable, default, primary key), unique constraints, foreign keys, indexes
+- Out of scope: Oracle, MSSQL, views, stored procedures, triggers, partitions, schema-level permissions
 
 ## API Contract
 
@@ -48,6 +48,15 @@ class SchemaIntrospector:
 
     async def reload(self) -> list[TableInfo]:
         """Force re-introspection and update cache."""
+
+    @property
+    def last_reload_at(self) -> datetime | None:
+        """Wall-clock time of the last successful introspect()/reload().
+
+        ``None`` until the first successful run. Consumed by the health
+        endpoint and the ``introspection_last_reload_timestamp`` metric —
+        a real timestamp, NOT the current wall-clock at the call site.
+        """
 ```
 
 ## Data Model
@@ -73,7 +82,9 @@ The introspected schema is cached in memory as `list[TableInfo]` after first cal
 - [ ] Nullable/non-nullable columns are correctly distinguished.
 - [ ] Cached schema is returned on subsequent calls without re-querying the database.
 - [ ] `reload()` forces a fresh introspection.
+- [ ] `last_reload_at` is `None` before first introspect, and equals the wall-clock time of the most recent successful `introspect()` / `reload()` afterward.
 - [ ] Connection errors produce clear, actionable error messages.
+- [ ] `introspect_table()` errors caused by an unknown table name surface as a distinct lookup error, NOT as a generic `ConnectionError`.
 - [ ] All database queries are async.
 
 ## Module Location

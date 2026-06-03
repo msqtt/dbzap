@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     # API mode
     api_mode: Literal["rest", "graphql", "both"] = "both"
 
+    # CORS — secure-by-default. Wildcard origin requires credentials=False
+    # (browsers reject `Access-Control-Allow-Origin: *` with credentials).
+    cors_origins: list[str] = ["*"]
+    cors_allow_credentials: bool = False
+
     # Explorer UI
     enable_explorer: bool = True
     explorer_username: str | None = None

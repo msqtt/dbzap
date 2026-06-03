@@ -8,15 +8,32 @@ import decimal
 import json
 import re
 import sys
+import types
 import uuid
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import strawberry
 import structlog
 from fastapi import FastAPI
-from sqlalchemy import Table, Column, MetaData, Integer, String, Float, Boolean, func
-from sqlalchemy import select, insert, update, delete
-from sqlalchemy.exc import IntegrityError
+
+# NOTE: many of these imports look unused statically, but they are
+# referenced *by name* inside the resolver source strings compiled via
+# ``exec()`` (see ``_build_resolver``). Removing them breaks runtime.
+from sqlalchemy import (  # noqa: F401
+    Boolean,
+    Column,
+    Float,
+    Integer,
+    MetaData,
+    String,
+    Table,
+    delete,
+    func,
+    insert,
+    select,
+    update,
+)
+from sqlalchemy.exc import IntegrityError  # noqa: F401
 from sqlalchemy.ext.asyncio import AsyncEngine
 from strawberry.fastapi import GraphQLRouter
 
@@ -73,7 +90,7 @@ def _encode_cursor(pk_values: dict[str, Any]) -> str:
 
 def _decode_cursor(token: str) -> dict[str, Any]:
     try:
-        return json.loads(base64.urlsafe_b64decode(token.encode()).decode())
+        return cast("dict[str, Any]", json.loads(base64.urlsafe_b64decode(token.encode()).decode()))
     except Exception as exc:
         raise ValueError(f"Invalid cursor: {token!r}") from exc
 
@@ -86,7 +103,7 @@ def _decode_cursor(token: str) -> dict[str, Any]:
 def _make_int_filter(ns: dict[str, Any]) -> type[Any]:
     name = "IntFilter"
     if name in ns:
-        return ns[name]
+        return cast("type[Any]", ns[name])
     fields = [
         ("eq", Optional[int], dataclasses.field(default=None)),
         ("gt", Optional[int], dataclasses.field(default=None)),
@@ -98,13 +115,13 @@ def _make_int_filter(ns: dict[str, Any]) -> type[Any]:
     dc.__module__ = _MOD
     t = strawberry.input(dc)
     ns[name] = t
-    return t
+    return cast("type[Any]", t)
 
 
 def _make_float_filter(ns: dict[str, Any]) -> type[Any]:
     name = "FloatFilter"
     if name in ns:
-        return ns[name]
+        return cast("type[Any]", ns[name])
     fields = [
         ("eq", Optional[float], dataclasses.field(default=None)),
         ("gt", Optional[float], dataclasses.field(default=None)),
@@ -116,13 +133,13 @@ def _make_float_filter(ns: dict[str, Any]) -> type[Any]:
     dc.__module__ = _MOD
     t = strawberry.input(dc)
     ns[name] = t
-    return t
+    return cast("type[Any]", t)
 
 
 def _make_string_filter(ns: dict[str, Any]) -> type[Any]:
     name = "StringFilter"
     if name in ns:
-        return ns[name]
+        return cast("type[Any]", ns[name])
     fields = [
         ("eq", Optional[str], dataclasses.field(default=None)),
         ("contains", Optional[str], dataclasses.field(default=None)),
@@ -132,13 +149,13 @@ def _make_string_filter(ns: dict[str, Any]) -> type[Any]:
     dc.__module__ = _MOD
     t = strawberry.input(dc)
     ns[name] = t
-    return t
+    return cast("type[Any]", t)
 
 
 def _make_boolean_filter(ns: dict[str, Any]) -> type[Any]:
     name = "BooleanFilter"
     if name in ns:
-        return ns[name]
+        return cast("type[Any]", ns[name])
     fields = [
         ("eq", Optional[bool], dataclasses.field(default=None)),
     ]
@@ -146,7 +163,7 @@ def _make_boolean_filter(ns: dict[str, Any]) -> type[Any]:
     dc.__module__ = _MOD
     t = strawberry.input(dc)
     ns[name] = t
-    return t
+    return cast("type[Any]", t)
 
 
 def _filter_type_for_python_type(pt: type[Any], ns: dict[str, Any]) -> type[Any] | None:
@@ -169,7 +186,7 @@ def _filter_type_for_python_type(pt: type[Any], ns: dict[str, Any]) -> type[Any]
 def _make_page_info(ns: dict[str, Any]) -> type[Any]:
     name = "PageInfo"
     if name in ns:
-        return ns[name]
+        return cast("type[Any]", ns[name])
     fields = [
         ("hasNextPage", bool, dataclasses.field(default=False)),
         ("hasPreviousPage", bool, dataclasses.field(default=False)),
@@ -180,7 +197,7 @@ def _make_page_info(ns: dict[str, Any]) -> type[Any]:
     dc.__module__ = _MOD
     t = strawberry.type(dc)
     ns[name] = t
-    return t
+    return cast("type[Any]", t)
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +220,7 @@ def _make_output_type(table: TableInfo, ns: dict[str, Any]) -> type[Any]:
     dc.__module__ = _MOD
     t = strawberry.type(dc)
     ns[name] = t
-    return t
+    return cast("type[Any]", t)
 
 
 def _make_create_input(table: TableInfo, ns: dict[str, Any]) -> type[Any]:
@@ -225,7 +242,7 @@ def _make_create_input(table: TableInfo, ns: dict[str, Any]) -> type[Any]:
     dc.__module__ = _MOD
     t = strawberry.input(dc)
     ns[name] = t
-    return t
+    return cast("type[Any]", t)
 
 
 def _make_update_input(table: TableInfo, ns: dict[str, Any]) -> type[Any]:
@@ -242,7 +259,7 @@ def _make_update_input(table: TableInfo, ns: dict[str, Any]) -> type[Any]:
     dc.__module__ = _MOD
     t = strawberry.input(dc)
     ns[name] = t
-    return t
+    return cast("type[Any]", t)
 
 
 def _make_table_filter(table: TableInfo, ns: dict[str, Any]) -> type[Any]:
@@ -250,7 +267,7 @@ def _make_table_filter(table: TableInfo, ns: dict[str, Any]) -> type[Any]:
     pascal = _pascal(_safe_name(table.name))
     name = pascal + "Filter"
     if name in ns:
-        return ns[name]
+        return cast("type[Any]", ns[name])
     fields: list[Any] = []
     for col in table.columns:
         ft = _filter_type_for_python_type(col.python_type, ns)
@@ -262,14 +279,14 @@ def _make_table_filter(table: TableInfo, ns: dict[str, Any]) -> type[Any]:
     dc.__module__ = _MOD
     t = strawberry.input(dc)
     ns[name] = t
-    return t
+    return cast("type[Any]", t)
 
 
 def _make_edge_type(out_type: type[Any], ns: dict[str, Any]) -> type[Any]:
     out_name = out_type.__name__
     edge_name = out_name + "Edge"
     if edge_name in ns:
-        return ns[edge_name]
+        return cast("type[Any]", ns[edge_name])
     fields = [
         ("node", out_type, dataclasses.field(default=None)),
         ("cursor", str, dataclasses.field(default="")),
@@ -278,16 +295,16 @@ def _make_edge_type(out_type: type[Any], ns: dict[str, Any]) -> type[Any]:
     dc.__module__ = _MOD
     t = strawberry.type(dc)
     ns[edge_name] = t
-    return t
+    return cast("type[Any]", t)
 
 
 def _make_connection_type(out_type: type[Any], edge_type: type[Any], ns: dict[str, Any]) -> type[Any]:
     out_name = out_type.__name__
     conn_name = out_name + "Connection"
     if conn_name in ns:
-        return ns[conn_name]
+        return cast("type[Any]", ns[conn_name])
     page_info_type = _make_page_info(ns)
-    fields = [
+    fields: list[Any] = [
         ("edges", list[edge_type], dataclasses.field(default_factory=list)),  # type: ignore[valid-type]
         ("pageInfo", page_info_type, dataclasses.field(default=None)),
         ("totalCount", int, dataclasses.field(default=0)),
@@ -296,7 +313,7 @@ def _make_connection_type(out_type: type[Any], edge_type: type[Any], ns: dict[st
     dc.__module__ = _MOD
     t = strawberry.type(dc)
     ns[conn_name] = t
-    return t
+    return cast("type[Any]", t)
 
 
 # ---------------------------------------------------------------------------
@@ -387,22 +404,39 @@ def _apply_search(query: Any, sa_tbl: Table, search: str | None, string_columns:
 # ---------------------------------------------------------------------------
 
 
-def _build_resolver(src: str, extra_globals: dict[str, Any]) -> Any:
-    """Compile a resolver function, injecting types into its globals namespace."""
+def _build_resolver(
+    src: str,
+    extra_globals: dict[str, Any],
+    *,
+    module: str = _MOD,
+) -> Any:
+    """Compile a resolver function with an isolated globals namespace.
+
+    The compiled function gets a fresh dict containing this module's
+    globals merged with the per-resolver ``extra_globals``. We MUST NOT
+    write back into ``sys.modules[_MOD].__dict__`` — doing so leaks
+    dynamically-built classes across generator instances and silently
+    overwrites types of the same name on successive calls. See
+    specs/05-graphql-api-generator.md (Generator isolation).
+
+    ``module`` controls the resulting function's ``__module__``; by
+    default it is this module, but generators pass an isolated fake
+    module so Strawberry's type-hint resolution finds the per-call types.
+    """
     globs: dict[str, Any] = {
-        **sys.modules[_MOD].__dict__,
+        **globals(),
         **extra_globals,
     }
-    exec(src, globs)  # noqa: S102
+    exec(src, globs)
     fn = globs[_extract_fn_name(src)]
-    fn.__module__ = _MOD
+    fn.__module__ = module
     return fn
 
 
 def _extract_fn_name(src: str) -> str:
     for line in src.splitlines():
         line = line.strip()
-        if line.startswith("async def ") or line.startswith("def "):
+        if line.startswith(("async def ", "def ")):
             return line.split("(")[0].split()[-1]
     raise ValueError("Could not extract function name")
 
@@ -638,7 +672,7 @@ async def resolver(id: int, input: {in_name}) -> Optional[{out_name}]:
 
 
 def _delete_resolver(sa_tbl: Table, pk: str, engine: AsyncEngine) -> Any:
-    src = f"""
+    src = """
 async def resolver(id: int) -> bool:
     async with engine.begin() as conn:
         result = await conn.execute(delete(sa_tbl).where(sa_tbl.c[pk] == id))
@@ -653,13 +687,51 @@ async def resolver(id: int) -> bool:
 
 
 class GraphqlApiGenerator:
+    # Monotonic counter for unique per-instance fake-module names.
+    _instance_counter: int = 0
+
     def __init__(self, *, engine: AsyncEngine) -> None:
         self._engine = engine
         self._metadata = MetaData()
 
+    def _make_isolated_module(self) -> types.ModuleType:
+        """Create a per-call fake module to host dynamically-built types.
+
+        Strawberry resolves type-hint forward references via
+        ``sys.modules[fn.__module__]``. We give every ``generate()`` call
+        its own isolated module so type names cannot collide or bleed
+        between independent schemas. Crucially, the real
+        ``dbzap.generators.graphql`` module's ``__dict__`` stays untouched.
+        See specs/05-graphql-api-generator.md (Generator isolation).
+        """
+        GraphqlApiGenerator._instance_counter += 1
+        mod_name = f"{_MOD}._isolated_{GraphqlApiGenerator._instance_counter}"
+        mod = types.ModuleType(mod_name)
+        # Seed with this module's static globals so resolver code can
+        # reference imports (select, func, dataclasses, strawberry, ...).
+        mod.__dict__.update(globals())
+        # Restore __name__ — globals() copied the real module's __name__
+        # in, which would defeat the whole point of isolating per-call.
+        mod.__dict__["__name__"] = mod_name
+        sys.modules[mod_name] = mod
+        return mod
+
     def generate(self, tables: list[TableInfo]) -> strawberry.Schema:
-        # Shared namespace so resolver code can reference generated types by name
+        # Per-call namespace + per-call fake module — never touch the
+        # real graphql module's __dict__.
         ns: dict[str, Any] = {}
+        iso_mod = self._make_isolated_module()
+        iso_name = iso_mod.__name__
+
+        def _claim(*objs: Any) -> None:
+            """Reassign __module__ to the isolated module and register types
+            into its __dict__ so Strawberry's type-hint resolution finds them."""
+            for obj in objs:
+                obj.__module__ = iso_name
+                # Only types/classes have __name__; resolvers are functions
+                # with __name__ == 'resolver' which we don't want to register.
+                if isinstance(obj, type):
+                    iso_mod.__dict__[obj.__name__] = obj
 
         query_fields: dict[str, Any] = {}
         query_annotations: dict[str, Any] = {}
@@ -686,23 +758,29 @@ class GraphqlApiGenerator:
                 if col.python_type is str
             }
 
+            _claim(out_type, create_input, update_input, filter_input)
             extra_types.extend([out_type, create_input, update_input, filter_input])
-
-            # Update module-level namespace so resolvers can reference these types
-            sys.modules[_MOD].__dict__.update(ns)
+            # Also stash auxiliary filter input types (IntFilter, StringFilter, etc.)
+            # that may have been auto-created inside _make_table_filter.
+            for name, obj in list(ns.items()):
+                if isinstance(obj, type):
+                    iso_mod.__dict__.setdefault(name, obj)
+                    if obj.__module__ == _MOD:
+                        obj.__module__ = iso_name
 
             # Relay connection types
             edge_type = _make_edge_type(out_type, ns)
             conn_type = _make_connection_type(out_type, edge_type, ns)
             page_info_type = _make_page_info(ns)
+            _claim(edge_type, conn_type, page_info_type)
             extra_types.extend([edge_type, conn_type, page_info_type])
-            sys.modules[_MOD].__dict__.update(ns)
 
             # List query (Relay Connection)
             lr = _list_resolver(
                 sa_tbl, self._engine, out_type, edge_type, conn_type,
                 page_info_type, filter_input, pk_cols, string_columns, has_single_pk,
             )
+            lr.__module__ = iso_name
             query_fields[camel] = strawberry.field(resolver=lr)
             query_annotations[camel] = conn_type
 
@@ -712,11 +790,13 @@ class GraphqlApiGenerator:
                     bir = _byid_single_resolver(sa_tbl, pk_cols[0], self._engine, out_type)
                 else:
                     bir = _byid_composite_resolver(sa_tbl, pk_cols, self._engine, out_type)
+                bir.__module__ = iso_name
                 query_fields[f"{camel}ById"] = strawberry.field(resolver=bir)
                 query_annotations[f"{camel}ById"] = Optional[out_type]
 
             # Create mutation
             cr = _create_resolver(sa_tbl, pk_cols, self._engine, out_type, create_input)
+            cr.__module__ = iso_name
             mutation_fields[f"create{pascal}"] = strawberry.field(resolver=cr)
             mutation_annotations[f"create{pascal}"] = out_type
 
@@ -727,11 +807,13 @@ class GraphqlApiGenerator:
 
             # Update mutation
             ur = _update_resolver(sa_tbl, pk, self._engine, out_type, update_input)
+            ur.__module__ = iso_name
             mutation_fields[f"update{pascal}"] = strawberry.field(resolver=ur)
             mutation_annotations[f"update{pascal}"] = Optional[out_type]
 
             # Delete mutation
             dr = _delete_resolver(sa_tbl, pk, self._engine)
+            dr.__module__ = iso_name
             mutation_fields[f"delete{pascal}"] = strawberry.field(resolver=dr)
             mutation_annotations[f"delete{pascal}"] = bool
 

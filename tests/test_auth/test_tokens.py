@@ -30,7 +30,7 @@ def test_expired_token_raises() -> None:
     token = create_access_token({"sub": "1"}, secret=SECRET, algorithm=ALGORITHM, expire_minutes=0)
     # expire_minutes=0 means expires immediately; sleep briefly so it's past expiry
     time.sleep(1)
-    with pytest.raises(Exception, match="[Ee]xpir"):
+    with pytest.raises(Exception, match=r"[Ee]xpir"):
         decode_access_token(token, secret=SECRET, algorithm=ALGORITHM)
 
 

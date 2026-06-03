@@ -110,6 +110,35 @@ At startup, `UserStore.initialize()` creates the `_users` table if it does not e
   - If the user already exists: update the password hash if it no longer matches (allows password rotation via `.env` change + restart).
 - If either is not set: skip seeding (no admin user is created; login will fail until credentials are configured).
 
+## Security Requirements
+
+### Constant-time login
+
+Authentication MUST NOT leak whether a username exists via response
+timing. Both successful and failed paths MUST take comparable time:
+
+- When the username is unknown, the server MUST still perform a bcrypt
+  verify against a fixed, well-known dummy hash before returning 401.
+- This applies to both `POST /auth/login` and Basic Auth on every
+  request — anywhere `verify_password` is called, an unknown user must
+  trigger an equivalent dummy verification.
+
+bcrypt verification dominates the request time (~100 ms vs ~1 ms for a
+DB lookup), so without this dummy step an attacker can enumerate valid
+usernames simply by measuring response times.
+
+### bcrypt password length
+
+bcrypt silently truncates the input to 72 bytes. UTF-8 passwords with
+non-ASCII characters (CJK, emoji) reach the limit at fewer than 72
+visible characters, weakening the hash without warning.
+
+`hash_password` and `verify_password` MUST be safe for arbitrary-length
+inputs. The standard mitigation is to pre-hash the password with SHA-256
+when it would otherwise exceed bcrypt's limit, then base64-encode the
+digest before passing it to bcrypt. Both functions MUST apply the same
+pre-hash so verification stays consistent.
+
 ## Edge Cases
 - Wrong password on login: return 401 Unauthorized (same message as unknown username to avoid enumeration).
 - Expired JWT token: return 401 with `{"detail": "Token has expired"}`.
@@ -138,6 +167,8 @@ At startup, `UserStore.initialize()` creates the `_users` table if it does not e
 - [ ] `_users` table is created automatically at startup if it does not exist.
 - [ ] `_users` table is excluded from introspection and API generation.
 - [ ] Passwords are never logged, returned, or stored in plaintext.
+- [ ] Passwords longer than 72 bytes are accepted and verified correctly (no silent truncation by bcrypt).
+- [ ] Login responses for unknown usernames take comparable time to login responses for known usernames with a wrong password (dummy bcrypt verify on the unknown-user path).
 - [ ] `jwt_secret_key` is required - no insecure default.
 - [ ] No `/auth/register` endpoint exists.
 - [ ] Admin user is seeded from `EXPLORER_USERNAME` / `EXPLORER_PASSWORD` at startup.

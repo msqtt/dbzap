@@ -1,7 +1,7 @@
 import math
 import threading
 from collections import defaultdict
-from typing import Any, Callable
+from collections.abc import Callable
 
 from fastapi import APIRouter
 from fastapi.responses import PlainTextResponse
@@ -181,7 +181,7 @@ def create_metrics_router(
         if pool_stats_provider is not None:
             try:
                 size, checked_out, overflow = pool_stats_provider()
-            except Exception:  # noqa: BLE001 — never fail a scrape on pool errors
+            except Exception:
                 pass
             else:
                 collector.update_pool_stats(size, checked_out, overflow)

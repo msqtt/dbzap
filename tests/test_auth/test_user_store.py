@@ -1,7 +1,6 @@
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from dbzap.auth.models import UserRecord
 from dbzap.auth.user_store import UserStore
 
 
@@ -21,7 +20,6 @@ async def store(engine: AsyncEngine) -> UserStore:
 
 async def test_initialize_creates_table(store: UserStore, engine: AsyncEngine) -> None:
     from sqlalchemy import inspect as sa_inspect
-    from sqlalchemy.ext.asyncio import AsyncConnection
 
     async with engine.connect() as conn:
         tables = await conn.run_sync(lambda c: sa_inspect(c).get_table_names())

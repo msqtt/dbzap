@@ -124,7 +124,7 @@ async def test_basic_password_with_colon(engine: AsyncEngine) -> None:
     async with AsyncClient(
         transport=ASGITransport(app=FastAPI()),
         base_url="http://test",
-    ) as client:
+    ):
         # Use a fresh store with a password containing ':'
         eng = create_async_engine("sqlite+aiosqlite:///:memory:")
         try:
@@ -185,3 +185,68 @@ async def test_register_not_found(engine: AsyncEngine) -> None:
     async with await _make_client(engine, _settings()) as client:
         resp = await client.post("/auth/register", json={"username": "alice", "password": "s3cureP@ss"})
         assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Constant-time login (spec 06: prevent username enumeration via timing).
+# ---------------------------------------------------------------------------
+
+
+async def test_login_unknown_user_runs_dummy_bcrypt_verify(
+    engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unknown username MUST still trigger a bcrypt verify call.
+
+    Without the dummy verify, the unknown-user branch returns ~100 ms
+    earlier than the wrong-password branch and leaks user existence.
+    """
+    import dbzap.auth.routes as routes_mod
+
+    call_count = {"verify": 0}
+
+    real_verify = routes_mod.verify_password
+
+    def counting_verify(plain: str, hashed: str) -> bool:
+        call_count["verify"] += 1
+        return real_verify(plain, hashed)
+
+    monkeypatch.setattr(routes_mod, "verify_password", counting_verify)
+
+    async with await _make_client(engine, _settings(auth_mode="jwt")) as client:
+        resp = await client.post(
+            "/auth/login",
+            json={"username": "does-not-exist", "password": "anything"},
+        )
+
+    assert resp.status_code == 401
+    assert call_count["verify"] >= 1, (
+        "verify_password was never called on the unknown-user path — this is "
+        "a timing oracle: attackers can enumerate usernames by response time"
+    )
+
+
+async def test_basic_auth_unknown_user_runs_dummy_bcrypt_verify(
+    engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Basic Auth MUST also run dummy verify on unknown users."""
+    import dbzap.auth.dependencies as deps_mod
+
+    call_count = {"verify": 0}
+
+    real_verify = deps_mod.verify_password
+
+    def counting_verify(plain: str, hashed: str) -> bool:
+        call_count["verify"] += 1
+        return real_verify(plain, hashed)
+
+    monkeypatch.setattr(deps_mod, "verify_password", counting_verify)
+
+    async with await _make_client(engine, _settings(auth_mode="basic")) as client:
+        cred = base64.b64encode(b"does-not-exist:any").decode()
+        resp = await client.get("/auth/me", headers={"Authorization": f"Basic {cred}"})
+
+    assert resp.status_code == 401
+    assert call_count["verify"] >= 1, (
+        "verify_password was never called for unknown user via Basic Auth — "
+        "timing oracle leaks user existence"
+    )

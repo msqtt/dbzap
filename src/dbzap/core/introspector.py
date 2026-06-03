@@ -1,9 +1,11 @@
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.engine import Connection, Inspector, make_url
+from sqlalchemy.exc import NoSuchTableError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from dbzap.core.config import Settings, get_settings
@@ -54,6 +56,16 @@ class SchemaIntrospector:
             # SQLite URL would crash here on ``pool_size`` kwargs.
             self._engine = build_engine(settings or get_settings())
         self._cache: list[TableInfo] | None = None
+        self._last_reload_at: datetime | None = None
+
+    @property
+    def last_reload_at(self) -> datetime | None:
+        """Wall-clock time of the last successful introspect()/reload().
+
+        Consumed by the health endpoint and metrics. ``None`` until the
+        first successful call. See specs/02-db-introspection.md.
+        """
+        return self._last_reload_at
 
     async def introspect(self) -> list[TableInfo]:
         if self._cache is not None:
@@ -67,6 +79,7 @@ class SchemaIntrospector:
             masked = make_url(str(self._engine.url)).render_as_string(hide_password=True)
             raise ConnectionError(f"Failed to connect to {masked}") from exc
         self._cache = result
+        self._last_reload_at = datetime.now(UTC)
         return self._cache
 
     async def introspect_table(self, table_name: str) -> TableInfo:
@@ -78,6 +91,10 @@ class SchemaIntrospector:
 
                 return await conn.run_sync(_reflect_single)
         except ConnectionError:
+            raise
+        except NoSuchTableError:
+            # Distinct from connection failures — the connection succeeded,
+            # the table just does not exist (specs/02-db-introspection.md).
             raise
         except Exception as exc:
             masked = make_url(str(self._engine.url)).render_as_string(hide_password=True)
@@ -130,7 +147,7 @@ class SchemaIntrospector:
                 target_column=tgt,
             )
             for fk in fk_list
-            for src, tgt in zip(fk["constrained_columns"], fk["referred_columns"])
+            for src, tgt in zip(fk["constrained_columns"], fk["referred_columns"], strict=False)
         ]
 
         return TableInfo(

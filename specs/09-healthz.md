@@ -119,11 +119,14 @@ Routes are registered unconditionally in `create_app()`, before auth middleware.
 - Service just started (startup phase): `/healthz/ready` returns 503 until first introspection completes.
 - Connection pool exhausted: readiness check uses a fresh connection, not from the pool, to avoid deadlock.
 - Clock skew: `uptime_seconds` uses `time.monotonic()` (not wall clock) to avoid drift issues.
+- `introspection.last_reload`: MUST reflect the wall-clock time of the last successful `introspect()` / `reload()` call on the introspector, NOT the current wall-clock at the moment `/healthz/detail` is served. The introspector is the source of truth (`SchemaIntrospector.last_reload_at`). Returning "now" on every call silently lies to monitoring tooling.
+- `introspection.last_reload` is `null` until the first successful introspect, even if the cache happens to be empty for other reasons.
 
 ## Acceptance Criteria
 - [ ] `GET /healthz` returns 200 as long as the process is running.
 - [ ] `GET /healthz/ready` returns 200 when database is reachable, 503 when not.
 - [ ] `GET /healthz/detail` requires authentication and returns extended diagnostics.
+- [ ] `introspection.last_reload` reflects the introspector's actual last reload timestamp (or `null` before first reload), never the current wall-clock at the call site.
 - [ ] Response includes `timestamp` (ISO 8601) and `uptime_seconds`.
 - [ ] Readiness check completes within 5 seconds (timeout protection).
 - [ ] Readiness check uses a fresh connection to avoid pool deadlock.

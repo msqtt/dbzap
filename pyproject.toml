@@ -5,7 +5,7 @@ description = "Zero-config REST & GraphQL API generator from database DDL with a
 authors = [
     {name = "msqtt"}
 ]
-requires-python = "^3.11"
+requires-python = ">=3.11,<4.0"
 dependencies = [
     "fastapi (>=0.136.3,<0.137.0)",
     "uvicorn[standard] (>=0.48.0,<0.49.0)",
@@ -34,8 +34,10 @@ packages = [{include = "dbzap", from = "src"}]
 dev = [
     "pytest (>=9.0.3,<10.0.0)",
     "pytest-asyncio (>=1.4.0,<2.0.0)",
+    "pytest-cov (>=6.0.0,<7.0.0)",
     "httpx (>=0.28.1,<0.29.0)",
     "mypy (>=2.1.0,<3.0.0)",
+    "ruff (>=0.7.0,<1.0.0)",
     "aiosqlite (>=0.22.1,<0.23.0)",
     "types-python-jose (>=3.5.0.20260408,<4.0.0.0)"
 ]
@@ -43,6 +45,52 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["src/dbzap"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".venv", "build", "dist"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # bugbear
+    "UP",   # pyupgrade
+    "SIM",  # simplify
+    "C4",   # comprehensions
+    "PIE",  # misc lints
+    "RUF",  # ruff-specific
+]
+ignore = [
+    "E501",   # line too long — handled by formatter / not strict
+    "B008",   # mutable default args (FastAPI Depends pattern)
+    "B904",   # raise from in our HTTPException helpers — noisy
+    "SIM117", # combining nested with statements; readability is fine
+    "UP045",  # Optional[X] vs X | None — strawberry/dataclass needs Optional form
+    "RUF003", # Cyrillic / wide punctuation in comments — false positives in zh comments
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = [
+    "B011",   # asserts in tests
+    "B017",   # pytest.raises(Exception) is intentional in some negative tests
+    "RUF012", # mutable defaults on stub classes inside tests
+]
 
 [tool.mypy]
 python_version = "3.11"

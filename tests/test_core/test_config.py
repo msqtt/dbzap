@@ -1,7 +1,6 @@
 import pytest
 from pydantic import ValidationError
 
-
 BASE_ENV = {
     "database_url": "postgresql+asyncpg://user:pass@localhost/db",
     "jwt_secret_key": "supersecret",
@@ -45,8 +44,9 @@ class TestSettingsLoading:
         assert s.db_statement_timeout == "5s"
 
     def test_missing_database_url_raises(self, monkeypatch):
-        from dbzap.core.config import Settings
         from pydantic_settings import SettingsConfigDict
+
+        from dbzap.core.config import Settings
 
         class TestSettings(Settings):
             model_config = SettingsConfigDict(env_file=None)
@@ -59,8 +59,9 @@ class TestSettingsLoading:
         assert "database_url" in fields
 
     def test_missing_jwt_secret_key_raises(self, monkeypatch):
-        from dbzap.core.config import Settings
         from pydantic_settings import SettingsConfigDict
+
+        from dbzap.core.config import Settings
 
         class TestSettings(Settings):
             model_config = SettingsConfigDict(env_file=None)
@@ -86,7 +87,6 @@ class TestSettingsLoading:
 
     def test_jwt_secret_key_has_no_default(self):
         """jwt_secret_key must be required — no insecure default."""
-        import inspect
         from dbzap.core.config import Settings
 
         fields = Settings.model_fields

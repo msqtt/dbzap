@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import base64
 import re
-from typing import Any
+from typing import Any, cast
 
-from sqlalchemy import ColumnElement, String, Table, and_, or_
+from sqlalchemy import ColumnElement, Table, and_, or_
 
 _LHS_RE = re.compile(r"^([a-zA-Z_]\w*)\[([a-zA-Z_]+)\]$")
 
@@ -48,10 +48,7 @@ def parse_filters(
 
     Raises ``ValueError`` for unsupported operators.
     """
-    if isinstance(query_params, dict):
-        items = list(query_params.items())
-    else:
-        items = list(query_params)
+    items = list(query_params.items()) if isinstance(query_params, dict) else list(query_params)
 
     conditions: list[dict[str, Any]] = []
     seen: dict[tuple[str, str], dict[str, Any]] = {}
@@ -114,13 +111,13 @@ def _build_condition(
     raw = cond["value"]
 
     if isinstance(raw, list):
-        parts = [_build_single_condition(col, op, v) for v in raw]
-        parts = [p for p in parts if p is not None]
-        if not parts:
+        sub_parts = [_build_single_condition(col, op, v) for v in raw]
+        nonnull_parts: list[ColumnElement[bool]] = [p for p in sub_parts if p is not None]
+        if not nonnull_parts:
             return None
-        if len(parts) == 1:
-            return parts[0]
-        return or_(*parts)
+        if len(nonnull_parts) == 1:
+            return nonnull_parts[0]
+        return or_(*nonnull_parts)
 
     return _build_single_condition(col, op, raw)
 
@@ -129,26 +126,26 @@ def _build_single_condition(
     col: Any, op: str, raw: str,
 ) -> ColumnElement[bool] | None:
     if op == "eq":
-        return col == raw
+        return cast(ColumnElement[bool], col == raw)
     if op == "ne":
-        return col != raw
+        return cast(ColumnElement[bool], col != raw)
     if op == "gt":
-        return col > raw
+        return cast(ColumnElement[bool], col > raw)
     if op == "gte":
-        return col >= raw
+        return cast(ColumnElement[bool], col >= raw)
     if op == "lt":
-        return col < raw
+        return cast(ColumnElement[bool], col < raw)
     if op == "lte":
-        return col <= raw
+        return cast(ColumnElement[bool], col <= raw)
     if op == "like":
-        return col.like(f"%{raw}%")
+        return cast(ColumnElement[bool], col.like(f"%{raw}%"))
     if op == "in":
         vals = [v.strip() for v in raw.split(",") if v.strip()]
-        return col.in_(vals)
+        return cast(ColumnElement[bool], col.in_(vals))
     if op == "is":
         if raw == "null":
-            return col.is_(None)
-        return col.isnot(None)
+            return cast(ColumnElement[bool], col.is_(None))
+        return cast(ColumnElement[bool], col.isnot(None))
     return None
 
 

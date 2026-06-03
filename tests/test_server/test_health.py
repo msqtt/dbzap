@@ -1,7 +1,9 @@
+from datetime import UTC
+
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from dbzap.core.config import Settings
 from dbzap.server.app import create_app
@@ -93,9 +95,7 @@ async def test_readiness_body_shape(client: AsyncClient) -> None:
 
 
 async def test_readiness_503_when_db_unreachable() -> None:
-    from datetime import datetime, timezone
-
-    from sqlalchemy.ext.asyncio import create_async_engine
+    from datetime import datetime
 
     from dbzap.core.introspector import SchemaIntrospector
     from dbzap.server.health import HealthCheck
@@ -105,7 +105,7 @@ async def test_readiness_503_when_db_unreachable() -> None:
     hc = HealthCheck(
         engine=bad_engine,
         introspector=introspector,
-        start_time=datetime.now(timezone.utc),
+        start_time=datetime.now(UTC),
     )
     status_code, body = await hc.readiness()
     assert status_code == 503
@@ -152,3 +152,36 @@ async def test_detail_body_shape(client: AsyncClient) -> None:
 async def test_uptime_is_positive(client: AsyncClient) -> None:
     resp = await client.get("/healthz")
     assert resp.json()["uptime_seconds"] >= 0.0
+
+
+# ---------------------------------------------------------------------------
+# /healthz/detail introspection.last_reload — must reflect the introspector's
+# actual last reload, not the current time at the call site (spec 09).
+# ---------------------------------------------------------------------------
+
+
+async def test_detail_last_reload_reflects_introspector_state(client: AsyncClient) -> None:
+    """``introspection.last_reload`` MUST come from the introspector,
+    NOT be fabricated by recomputing ``datetime.now()`` on every call."""
+    import asyncio
+
+    # First call to /healthz/detail (after auth)
+    login = await client.post("/auth/login", json={"username": "admin", "password": "s3cureP@ss"})
+    token = login.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    r1 = await client.get("/healthz/detail", headers=headers)
+    assert r1.status_code == 200
+    first = r1.json()["introspection"]["last_reload"]
+
+    # Wait a moment, then call again. last_reload must NOT change just
+    # because we polled — schema didn't reload.
+    await asyncio.sleep(0.1)
+
+    r2 = await client.get("/healthz/detail", headers=headers)
+    second = r2.json()["introspection"]["last_reload"]
+
+    assert first == second, (
+        f"last_reload changed between calls without an actual reload "
+        f"({first!r} -> {second!r}); endpoint is fabricating the timestamp"
+    )

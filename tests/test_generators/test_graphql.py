@@ -13,7 +13,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from dbzap.core.introspector import SchemaIntrospector, TableInfo
 from dbzap.generators.graphql import GraphqlApiGenerator
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -139,6 +138,39 @@ class TestSchemaStructure:
         assert "UsersConnection" in schema_str
         assert "UsersEdge" in schema_str
         assert "UsersFilter" in schema_str
+
+    def test_successive_generate_calls_are_isolated(
+        self, engine: AsyncEngine, tables: list[TableInfo]
+    ) -> None:
+        """Two independent generators must NOT pollute a shared module
+        namespace. Successive calls (different table sets, multi-tenant
+        setups, repeated test fixtures) MUST produce schemas that don't
+        bleed types into each other.
+        """
+
+        import dbzap.generators.graphql as graphql_mod
+
+        before = set(graphql_mod.__dict__.keys())
+
+        gen_a = GraphqlApiGenerator(engine=engine)
+        gen_a.generate(tables)
+
+        gen_b = GraphqlApiGenerator(engine=engine)
+        gen_b.generate(tables[:1])  # smaller schema
+
+        after = set(graphql_mod.__dict__.keys())
+        leaked = after - before
+        # Filter out anything pre-existing or from imports
+        suspicious = {
+            name for name in leaked
+            if not name.startswith("_")
+            and name not in {"sys"}  # stdlib leaks via lazy import are fine
+        }
+        assert not suspicious, (
+            f"GraphqlApiGenerator leaked dynamically-built types into "
+            f"sys.modules['{graphql_mod.__name__}']: {sorted(suspicious)}. "
+            "Successive generate() calls share state and silently overwrite types."
+        )
 
 
 # ---------------------------------------------------------------------------

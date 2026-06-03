@@ -1,7 +1,6 @@
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import create_async_engine
 
 from dbzap.core.config import Settings
 from dbzap.server.app import create_app
@@ -134,3 +133,57 @@ async def test_openapi_json_returns_schema_when_authenticated() -> None:
 async def test_missing_jwt_secret_raises_at_startup() -> None:
     with pytest.raises(Exception):
         Settings(database_url="sqlite+aiosqlite:///:memory:", jwt_secret_key="")
+
+
+# ---------------------------------------------------------------------------
+# CORS security: wildcard origin MUST coerce credentials=False
+# (W3C CORS spec; modern browsers reject the combo)
+# ---------------------------------------------------------------------------
+
+
+async def test_cors_wildcard_with_credentials_is_coerced_off() -> None:
+    """When cors_origins=['*'], cors_allow_credentials must be forced to False.
+
+    The W3C CORS spec forbids `Access-Control-Allow-Origin: *` together
+    with `Access-Control-Allow-Credentials: true`. Browsers reject such
+    responses. The factory must defensively coerce credentials off.
+    """
+    settings = _settings(
+        cors_origins=["*"],
+        cors_allow_credentials=True,  # user mistakenly enabled
+    )
+    app = await create_app(settings=settings)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        resp = await c.options(
+            "/auth/login",
+            headers={
+                "Origin": "http://attacker.example.com",
+                "Access-Control-Request-Method": "POST",
+            },
+        )
+    # When wildcard origin is in effect, allow-credentials MUST NOT be true.
+    creds = resp.headers.get("access-control-allow-credentials", "").lower()
+    assert creds != "true", (
+        "CORS responded with `Allow-Origin: *` AND `Allow-Credentials: true` — "
+        "this combination is rejected by browsers and is a security smell"
+    )
+
+
+async def test_cors_explicit_origin_can_keep_credentials() -> None:
+    """A specific origin (not wildcard) is free to opt into credentials."""
+    settings = _settings(
+        cors_origins=["http://app.example.com"],
+        cors_allow_credentials=True,
+    )
+    app = await create_app(settings=settings)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        resp = await c.options(
+            "/auth/login",
+            headers={
+                "Origin": "http://app.example.com",
+                "Access-Control-Request-Method": "POST",
+            },
+        )
+    # With an explicit origin, credentials may be true.
+    assert resp.headers.get("access-control-allow-origin") == "http://app.example.com"
+    assert resp.headers.get("access-control-allow-credentials", "").lower() == "true"

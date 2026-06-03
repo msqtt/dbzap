@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from jose import ExpiredSignatureError, JWTError, jwt
@@ -12,7 +12,7 @@ def create_access_token(
     expire_minutes: int,
 ) -> str:
     payload = dict(data)
-    expire = datetime.now(timezone.utc) + timedelta(minutes=expire_minutes)
+    expire = datetime.now(UTC) + timedelta(minutes=expire_minutes)
     payload["exp"] = expire
     return jwt.encode(payload, secret, algorithm=algorithm)
 

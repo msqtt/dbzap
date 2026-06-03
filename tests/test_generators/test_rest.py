@@ -13,7 +13,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from dbzap.core.introspector import SchemaIntrospector, TableInfo
 from dbzap.generators.rest import RestApiGenerator
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -118,7 +117,7 @@ def _table(tables: list[TableInfo], name: str) -> TableInfo:
 
 class TestRouteRegistration:
     def test_users_has_six_routes(self, app: FastAPI) -> None:
-        routes = {(r.path, list(r.methods or [])[0]) for r in app.routes}  # type: ignore[attr-defined]
+        routes = {(r.path, next(iter(r.methods or []))) for r in app.routes}  # type: ignore[attr-defined]
         assert ("/api/users", "POST") in routes
         assert ("/api/users", "GET") in routes
         assert ("/api/users/{pk}", "GET") in routes

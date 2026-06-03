@@ -2,17 +2,27 @@
 from __future__ import annotations
 
 import re
-from typing import Any, get_type_hints
+from typing import Any
 
 import structlog
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
-from fastapi.routing import APIRoute
-from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel, create_model
 from pydantic.json_schema import GenerateJsonSchema
-from sqlalchemy import Table, Column, MetaData, select, insert, update, delete, text, func
-from sqlalchemy import Integer, String, Float, Boolean, Numeric
+from sqlalchemy import (
+    Boolean,
+    Column,
+    Float,
+    Integer,
+    MetaData,
+    String,
+    Table,
+    delete,
+    func,
+    insert,
+    select,
+    update,
+)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -241,7 +251,7 @@ class RestApiGenerator:
         update_model_cls = _make_update_model(table)
         response_model_cls = _make_response_model(table)
         offset_pagination_model_cls = _make_offset_pagination_model(response_model_cls, table.name)
-        cursor_pagination_model_cls = _make_cursor_pagination_model(response_model_cls, table.name)
+        _make_cursor_pagination_model(response_model_cls, table.name)
         engine = self._engine
 
         has_pk = len(pk_cols) > 0
@@ -355,8 +365,8 @@ class RestApiGenerator:
 
         # Routes that require PK
         if is_composite:
-            pk_path = prefix + "".join(f"/{{{c}}}" for c in pk_cols)
-            route_pk = prefix + "/{pk}"  # captured as single path for simple routing
+            prefix + "".join(f"/{{{c}}}" for c in pk_cols)
+            prefix + "/{pk}"  # captured as single path for simple routing
             # Use individual path params for composite PKs
             _register_composite_pk_routes(
                 app, prefix, pk_cols, sa_tbl, engine,

@@ -75,6 +75,7 @@ No new tables. Orchestrates existing modules.
 - Empty database: generators handle gracefully (REST: no routes registered; GraphQL: placeholder query type).
 - Port already in use: uvicorn raises `OSError`, propagated to CLI output.
 - `_users` table must be excluded from introspection results before passing to generators.
+- **CORS unsafe combination**: when `cors_origins == ["*"]` the factory MUST coerce `allow_credentials` to `False` regardless of what the user configured (or what the default would be). This combination is invalid per W3C CORS spec and modern browsers reject any response that sets both `Access-Control-Allow-Origin: *` and `Access-Control-Allow-Credentials: true`. A noisy log warning SHOULD be emitted when the coercion happens.
 
 ## Acceptance Criteria
 - [ ] `create_app()` returns a working FastAPI application.
@@ -85,7 +86,8 @@ No new tables. Orchestrates existing modules.
 - [ ] GraphQL endpoint is mounted when `api_mode` is `graphql` or `both`.
 - [ ] `_users` table is filtered out before passing schema to generators.
 - [ ] Server starts and responds to requests via `uvicorn`.
-- [ ] CORS middleware is enabled (configurable origins, default `*` for development).
+- [ ] CORS middleware is configured from `cors_origins` and `cors_allow_credentials` Settings.
+- [ ] CORS wildcard origins force `allow_credentials=False` even if Settings set it to True (defensive coercion).
 
 ## Module Location
 `src/dbzap/server/`

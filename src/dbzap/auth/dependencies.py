@@ -1,12 +1,13 @@
 import base64
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from fastapi import HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import ExpiredSignatureError, JWTError
 
 from dbzap.auth.models import UserRecord
-from dbzap.auth.passwords import verify_password
+from dbzap.auth.passwords import get_dummy_hash, verify_password
 from dbzap.auth.tokens import decode_access_token
 from dbzap.auth.user_store import UserStore
 from dbzap.core.config import Settings
@@ -98,7 +99,17 @@ def make_get_current_user(
                 headers={"WWW-Authenticate": "Basic"},
             )
         user = await store.get_by_username(username)
-        if user is None or not verify_password(password, user.password_hash):
+        if user is None:
+            # Constant-time path: still pay the bcrypt cost so an
+            # attacker can't enumerate usernames via response timing
+            # (specs/06-auth.md).
+            verify_password(password, get_dummy_hash())
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid credentials",
+                headers={"WWW-Authenticate": "Basic"},
+            )
+        if not verify_password(password, user.password_hash):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid credentials",
