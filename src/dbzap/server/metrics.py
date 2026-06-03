@@ -1,7 +1,7 @@
 import math
 import threading
 from collections import defaultdict
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import APIRouter
 from fastapi.responses import PlainTextResponse
@@ -163,11 +163,28 @@ class MetricsCollector:
             return "\n".join(lines)
 
 
-def create_metrics_router(collector: MetricsCollector) -> APIRouter:
+def create_metrics_router(
+    collector: MetricsCollector,
+    pool_stats_provider: Callable[[], tuple[int, int, int]] | None = None,
+) -> APIRouter:
+    """Build the ``/metrics`` router.
+
+    ``pool_stats_provider`` is an optional zero-arg callable returning
+    ``(pool_size, checked_out, overflow)``.  When provided, the values are
+    refreshed on every scrape so that the exposition reflects current pool
+    state instead of the last value pushed via ``update_pool_stats``.
+    """
     router = APIRouter()
 
     @router.get("/metrics")
     async def metrics() -> PlainTextResponse:
+        if pool_stats_provider is not None:
+            try:
+                size, checked_out, overflow = pool_stats_provider()
+            except Exception:  # noqa: BLE001 — never fail a scrape on pool errors
+                pass
+            else:
+                collector.update_pool_stats(size, checked_out, overflow)
         return PlainTextResponse(collector.export_prometheus())
 
     return router

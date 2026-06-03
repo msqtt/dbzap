@@ -329,16 +329,21 @@ def _apply_filter_conditions(query: Any, sa_tbl: Table, filter_input: Any) -> An
     """Apply GraphQL filter input to a SQLAlchemy query."""
     if filter_input is None:
         return query
-    raw = dataclasses.asdict(filter_input)
     from sqlalchemy import and_ as sa_and
     parts: list[Any] = []
-    for col_name, op_dict in raw.items():
-        if col_name.startswith("_") or op_dict is None:
+    # Iterate dataclass fields directly to avoid the recursive deep-copy that
+    # ``dataclasses.asdict`` performs on every request.
+    for f in dataclasses.fields(filter_input):
+        col_name = f.name
+        if col_name.startswith("_"):
             continue
-        if col_name not in sa_tbl.c:
+        op_input = getattr(filter_input, col_name, None)
+        if op_input is None or col_name not in sa_tbl.c:
             continue
         col = sa_tbl.c[col_name]
-        for op, value in op_dict.items():
+        for sf in dataclasses.fields(op_input):
+            op = sf.name
+            value = getattr(op_input, op, None)
             if value is None:
                 continue
             if op == "eq":
@@ -478,7 +483,7 @@ async def resolver(
     base_q = base_q.limit(query_limit)
 
     async with engine.connect() as conn:
-        total = (await conn.execute(select(func.count()).select_from(select(sa_tbl).subquery()))).scalar_one()
+        total = (await conn.execute(select(func.count()).select_from(sa_tbl))).scalar_one()
         rows = (await conn.execute(base_q)).mappings().all()
 
     has_more = len(rows) > limit
@@ -563,11 +568,15 @@ def _create_resolver(
 
     src = f"""
 async def resolver(input: {in_name}) -> {out_name}:
-    raw = dataclasses.asdict(input)
-    cleaned = {{
-        k: v for k, v in raw.items()
-        if v is not None and v is not strawberry.UNSET and not k.startswith("_placeholder")
-    }}
+    cleaned = {{}}
+    for f in dataclasses.fields(input):
+        name = f.name
+        if name.startswith("_placeholder"):
+            continue
+        v = getattr(input, name)
+        if v is None or v is strawberry.UNSET:
+            continue
+        cleaned[name] = v
     async with engine.begin() as conn:
         try:
             result = await conn.execute(insert(sa_tbl).values(**cleaned))
@@ -594,8 +603,15 @@ def _update_resolver(
     in_name = input_type.__name__
     src = f"""
 async def resolver(id: int, input: {in_name}) -> Optional[{out_name}]:
-    raw = dataclasses.asdict(input)
-    updates = {{k: v for k, v in raw.items() if v is not None and not k.startswith("_placeholder")}}
+    updates = {{}}
+    for f in dataclasses.fields(input):
+        name = f.name
+        if name.startswith("_placeholder"):
+            continue
+        v = getattr(input, name)
+        if v is None:
+            continue
+        updates[name] = v
     if updates:
         async with engine.begin() as conn:
             result = await conn.execute(update(sa_tbl).where(sa_tbl.c[pk] == id).values(**updates))

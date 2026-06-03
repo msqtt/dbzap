@@ -267,14 +267,17 @@ class RestApiGenerator:
             except Exception as exc:
                 return JSONResponse(status_code=422, content={"detail": str(exc)})
 
-            async with engine.begin() as conn:
+            # Use a single connection for the insert + read-back, halving the
+            # pool round-trips. The insert runs in its own transaction so that
+            # a follow-up SELECT outside the transaction still observes it.
+            async with engine.connect() as conn:
                 try:
-                    result = await conn.execute(insert(sa_tbl).values(**cleaned))
-                    row_id = result.lastrowid
+                    async with conn.begin():
+                        result = await conn.execute(insert(sa_tbl).values(**cleaned))
+                        row_id = result.lastrowid
                 except IntegrityError as exc:
                     raise HTTPException(status_code=409, detail="Unique constraint violated") from exc
 
-            async with engine.connect() as conn:
                 if has_pk and not is_composite and row_id is not None:
                     pk_col = pk_cols[0]
                     row = (
@@ -381,15 +384,15 @@ class RestApiGenerator:
             # --- PUT (full update) ---
             async def full_update(pk: int, request: Request) -> dict[str, Any]:
                 body = await request.json()
-                async with engine.begin() as conn:
-                    result = await conn.execute(
-                        update(sa_tbl)
-                        .where(sa_tbl.c[pk_col_name] == pk)
-                        .values(**{k: v for k, v in body.items() if k != pk_col_name})
-                    )
-                if result.rowcount == 0:
-                    raise HTTPException(status_code=404, detail="Not found")
                 async with engine.connect() as conn:
+                    async with conn.begin():
+                        result = await conn.execute(
+                            update(sa_tbl)
+                            .where(sa_tbl.c[pk_col_name] == pk)
+                            .values(**{k: v for k, v in body.items() if k != pk_col_name})
+                        )
+                    if result.rowcount == 0:
+                        raise HTTPException(status_code=404, detail="Not found")
                     row = (
                         await conn.execute(
                             select(sa_tbl).where(sa_tbl.c[pk_col_name] == pk)
@@ -406,31 +409,24 @@ class RestApiGenerator:
             async def partial_update(pk: int, request: Request) -> dict[str, Any]:
                 body = await request.json()
                 updates = {k: v for k, v in body.items() if v is not None and k != pk_col_name}
-                if not updates:
-                    async with engine.connect() as conn:
-                        row = (
-                            await conn.execute(
-                                select(sa_tbl).where(sa_tbl.c[pk_col_name] == pk)
-                            )
-                        ).mappings().first()
-                    if row is None:
-                        raise HTTPException(status_code=404, detail="Not found")
-                    return dict(row)
-                async with engine.begin() as conn:
-                    result = await conn.execute(
-                        update(sa_tbl)
-                        .where(sa_tbl.c[pk_col_name] == pk)
-                        .values(**updates)
-                    )
-                if result.rowcount == 0:
-                    raise HTTPException(status_code=404, detail="Not found")
                 async with engine.connect() as conn:
+                    if updates:
+                        async with conn.begin():
+                            result = await conn.execute(
+                                update(sa_tbl)
+                                .where(sa_tbl.c[pk_col_name] == pk)
+                                .values(**updates)
+                            )
+                        if result.rowcount == 0:
+                            raise HTTPException(status_code=404, detail="Not found")
                     row = (
                         await conn.execute(
                             select(sa_tbl).where(sa_tbl.c[pk_col_name] == pk)
                         )
                     ).mappings().first()
-                return dict(row)  # type: ignore[arg-type]
+                if row is None:
+                    raise HTTPException(status_code=404, detail="Not found")
+                return dict(row)
 
             app.add_api_route(prefix + "/{pk}", partial_update, methods=["PATCH"],
                               summary=f"{tbl_label} Partial Update Row",
@@ -472,7 +468,13 @@ async def _offset_list(
     base_q = apply_filters(base_q, sa_tbl, conditions)
     base_q = apply_search(base_q, sa_tbl, q, string_columns)
 
-    count_q = select(func.count()).select_from(base_q.subquery())
+    # Reuse the WHERE clause directly on the table instead of wrapping the
+    # full ``SELECT *`` in a subquery — lets the planner satisfy the count
+    # from indexes without materializing every column.
+    count_q = select(func.count()).select_from(sa_tbl)
+    where = base_q.whereclause
+    if where is not None:
+        count_q = count_q.where(where)
     total: int = (await conn.execute(count_q)).scalar_one()
 
     offset = (page - 1) * page_size
@@ -625,11 +627,11 @@ def _register_pk_alias(
         body = await request.json()
         updates = {k: v for k, v in body.items() if k not in pk_cols}
         cond = [sa_tbl.c[col] == val for col, val in pk_values.items()]
-        async with engine.begin() as conn:
-            result = await conn.execute(update(sa_tbl).where(*cond).values(**updates))
-        if result.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Not found")
         async with engine.connect() as conn:
+            async with conn.begin():
+                result = await conn.execute(update(sa_tbl).where(*cond).values(**updates))
+            if result.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Not found")
             row = (await conn.execute(select(sa_tbl).where(*cond))).mappings().first()
         return dict(row)  # type: ignore[arg-type]
 
@@ -644,12 +646,12 @@ def _register_pk_alias(
         body = await request.json()
         updates = {k: v for k, v in body.items() if v is not None and k not in pk_cols}
         cond = [sa_tbl.c[col] == val for col, val in pk_values.items()]
-        if updates:
-            async with engine.begin() as conn:
-                result = await conn.execute(update(sa_tbl).where(*cond).values(**updates))
-            if result.rowcount == 0:
-                raise HTTPException(status_code=404, detail="Not found")
         async with engine.connect() as conn:
+            if updates:
+                async with conn.begin():
+                    result = await conn.execute(update(sa_tbl).where(*cond).values(**updates))
+                if result.rowcount == 0:
+                    raise HTTPException(status_code=404, detail="Not found")
             row = (await conn.execute(select(sa_tbl).where(*cond))).mappings().first()
         if row is None:
             raise HTTPException(status_code=404, detail="Not found")

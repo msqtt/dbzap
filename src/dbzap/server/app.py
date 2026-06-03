@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from dbzap.auth.dependencies import make_get_current_user
 from dbzap.auth.models import UserRecord
@@ -43,13 +43,63 @@ def _normalize_db_url(url: str) -> str:
     return url
 
 
+def _parse_timeout_ms(value: str) -> int | None:
+    """Parse a duration string like ``5s`` / ``500ms`` / ``5`` into milliseconds.
+
+    Returns None for empty / invalid values so callers can skip configuration.
+    """
+    if not value:
+        return None
+    v = value.strip().lower()
+    try:
+        if v.endswith("ms"):
+            return max(0, int(float(v[:-2].strip())))
+        if v.endswith("s"):
+            return max(0, int(float(v[:-1].strip()) * 1000))
+        return max(0, int(float(v) * 1000))
+    except (ValueError, TypeError):
+        return None
+
+
+def _build_engine(cfg: Settings) -> AsyncEngine:
+    """Build the async engine with dialect-aware pool sizing and timeouts.
+
+    SQLite uses ``StaticPool`` and rejects ``pool_size``/``max_overflow``-style
+    keyword arguments, so they are only forwarded for server databases.
+    """
+    url = _normalize_db_url(cfg.database_url)
+    kwargs: dict[str, Any] = {"pool_pre_ping": True}
+    timeout_ms = _parse_timeout_ms(cfg.db_statement_timeout)
+
+    if url.startswith("postgresql"):
+        kwargs["pool_size"] = cfg.db_pool_size
+        kwargs["max_overflow"] = cfg.db_max_overflow
+        kwargs["pool_timeout"] = cfg.db_pool_timeout
+        kwargs["pool_recycle"] = cfg.db_pool_recycle
+        if timeout_ms:
+            # asyncpg honors `server_settings` to apply per-connection GUCs.
+            kwargs["connect_args"] = {
+                "server_settings": {"statement_timeout": str(timeout_ms)}
+            }
+    elif url.startswith("mysql"):
+        kwargs["pool_size"] = cfg.db_pool_size
+        kwargs["max_overflow"] = cfg.db_max_overflow
+        kwargs["pool_timeout"] = cfg.db_pool_timeout
+        kwargs["pool_recycle"] = cfg.db_pool_recycle
+        if timeout_ms:
+            # aiomysql executes ``init_command`` on every new connection.
+            kwargs["connect_args"] = {
+                "init_command": f"SET SESSION MAX_EXECUTION_TIME={timeout_ms}"
+            }
+    # SQLite: keep the default StaticPool; pool sizing flags would raise.
+
+    return create_async_engine(url, **kwargs)
+
+
 async def create_app(settings: Settings | None = None) -> FastAPI:
     cfg = settings or get_settings()
 
-    engine = create_async_engine(
-        _normalize_db_url(cfg.database_url),
-        pool_pre_ping=True,
-    )
+    engine = _build_engine(cfg)
 
     introspector = SchemaIntrospector(engine=engine)
     try:
@@ -99,7 +149,18 @@ async def create_app(settings: Settings | None = None) -> FastAPI:
         get_current_user=get_current_user,
     )
     app.include_router(health_router)
-    app.include_router(create_metrics_router(collector))
+
+    def _pool_stats() -> tuple[int, int, int]:
+        pool = engine.pool
+        size_fn = getattr(pool, "size", None)
+        co_fn = getattr(pool, "checkedout", None)
+        of_fn = getattr(pool, "overflow", None)
+        size = int(size_fn() or 0) if callable(size_fn) else 0
+        checked_out = int(co_fn() or 0) if callable(co_fn) else 0
+        overflow_val = int(of_fn() or 0) if callable(of_fn) else 0
+        return size, checked_out, max(0, overflow_val)
+
+    app.include_router(create_metrics_router(collector, pool_stats_provider=_pool_stats))
 
     auth_router = create_auth_router(store=store, settings=cfg)
     app.include_router(auth_router)
