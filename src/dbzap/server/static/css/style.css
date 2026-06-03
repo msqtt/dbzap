@@ -1,6 +1,7 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-:root {
+/* Dark theme (default) */
+:root, [data-theme="dark"] {
   --bg: #0f1117;
   --bg2: #1a1d27;
   --bg3: #22263a;
@@ -16,6 +17,85 @@
   --orange: #f97316;
   --radius: 6px;
   --sidebar-w: 280px;
+
+  /* method tag backgrounds */
+  --tag-get-bg: #1a3a2e;
+  --tag-post-bg: #1a2e3a;
+  --tag-put-bg: #2e2a1a;
+  --tag-patch-bg: #2a1e3a;
+  --tag-delete-bg: #3a1a1a;
+  --tag-gql-bg: #2a1a3a;
+
+  /* status badge backgrounds */
+  --s2xx-bg: #1a3a2e;
+  --s4xx-bg: #2e2a1a;
+  --s5xx-bg: #3a1a1a;
+  --err-banner-bg: #3a1a1a;
+  --err-banner-border: #5a2a2a;
+}
+
+/* Light theme */
+[data-theme="light"] {
+  --bg: #f8f9fc;
+  --bg2: #ffffff;
+  --bg3: #f0f2f7;
+  --border: #d0d5e2;
+  --text: #111827;
+  --text-muted: #6b7280;
+  --accent: #4f46e5;
+  --accent-hover: #6366f1;
+  --green: #16a34a;
+  --yellow: #ca8a04;
+  --red: #dc2626;
+  --blue: #2563eb;
+  --orange: #ea580c;
+  --radius: 6px;
+  --sidebar-w: 280px;
+
+  --tag-get-bg: #dcfce7;
+  --tag-post-bg: #dbeafe;
+  --tag-put-bg: #fef9c3;
+  --tag-patch-bg: #ede9fe;
+  --tag-delete-bg: #fee2e2;
+  --tag-gql-bg: #fae8ff;
+
+  --s2xx-bg: #dcfce7;
+  --s4xx-bg: #fef9c3;
+  --s5xx-bg: #fee2e2;
+  --err-banner-bg: #fee2e2;
+  --err-banner-border: #fca5a5;
+}
+
+/* System default: respect OS preference when no explicit data-theme is set */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    --bg: #f8f9fc;
+    --bg2: #ffffff;
+    --bg3: #f0f2f7;
+    --border: #d0d5e2;
+    --text: #111827;
+    --text-muted: #6b7280;
+    --accent: #4f46e5;
+    --accent-hover: #6366f1;
+    --green: #16a34a;
+    --yellow: #ca8a04;
+    --red: #dc2626;
+    --blue: #2563eb;
+    --orange: #ea580c;
+    --radius: 6px;
+    --sidebar-w: 280px;
+    --tag-get-bg: #dcfce7;
+    --tag-post-bg: #dbeafe;
+    --tag-put-bg: #fef9c3;
+    --tag-patch-bg: #ede9fe;
+    --tag-delete-bg: #fee2e2;
+    --tag-gql-bg: #fae8ff;
+    --s2xx-bg: #dcfce7;
+    --s4xx-bg: #fef9c3;
+    --s5xx-bg: #fee2e2;
+    --err-banner-bg: #fee2e2;
+    --err-banner-border: #fca5a5;
+  }
 }
 
 html, body { height: 100%; background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; font-size: 14px; }
@@ -72,12 +152,12 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 .sidebar-item:hover { background: var(--bg3); color: var(--text); }
 .sidebar-item.active { background: var(--bg3); color: var(--text); border-left: 2px solid var(--accent); }
 .sidebar-item .method-tag { font-size: 10px; font-weight: 700; padding: 1px 5px; border-radius: 3px; min-width: 46px; text-align: center; }
-.method-tag.GET    { background: #1a3a2e; color: var(--green); }
-.method-tag.POST   { background: #1a2e3a; color: var(--blue); }
-.method-tag.PUT    { background: #2e2a1a; color: var(--yellow); }
-.method-tag.PATCH  { background: #2a1e3a; color: #a78bfa; }
-.method-tag.DELETE { background: #3a1a1a; color: var(--red); }
-.method-tag.GQL    { background: #2a1a3a; color: #e879f9; }
+.method-tag.GET    { background: var(--tag-get-bg);    color: var(--green); }
+.method-tag.POST   { background: var(--tag-post-bg);   color: var(--blue); }
+.method-tag.PUT    { background: var(--tag-put-bg);    color: var(--yellow); }
+.method-tag.PATCH  { background: var(--tag-patch-bg);  color: #7c3aed; }
+.method-tag.DELETE { background: var(--tag-delete-bg); color: var(--red); }
+.method-tag.GQL    { background: var(--tag-gql-bg);    color: #9333ea; }
 
 /* ---- explorer main ---- */
 .explorer-main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
@@ -99,13 +179,21 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 /* ---- response panel ---- */
 .response-header { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
 .status-badge { font-size: 13px; font-weight: 700; padding: 3px 10px; border-radius: 4px; }
-.status-badge.s2xx { background: #1a3a2e; color: var(--green); }
-.status-badge.s4xx { background: #2e2a1a; color: var(--yellow); }
-.status-badge.s5xx { background: #3a1a1a; color: var(--red); }
+.status-badge.s2xx { background: var(--s2xx-bg); color: var(--green); }
+.status-badge.s4xx { background: var(--s4xx-bg); color: var(--yellow); }
+.status-badge.s5xx { background: var(--s5xx-bg); color: var(--red); }
 .resp-time { font-size: 12px; color: var(--text-muted); }
-.resp-headers { background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; margin-bottom: 10px; font-family: monospace; font-size: 12px; white-space: pre-wrap; }
-.resp-body { background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; font-family: monospace; font-size: 12px; white-space: pre-wrap; overflow-x: auto; max-height: 420px; overflow-y: auto; }
+.resp-code-wrap { background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 10px; overflow: hidden; }
+.resp-code-toolbar { display: flex; align-items: center; justify-content: space-between; padding: 6px 12px; border-bottom: 1px solid var(--border); background: var(--bg2); }
+.resp-code-label { font-size: 11px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: .05em; }
+.copy-btn { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; font-size: 12px; background: var(--bg3); color: var(--text-muted); border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; transition: all .15s; }
+.copy-btn svg { flex-shrink: 0; }
+.copy-btn:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+.copy-btn.copied { color: var(--green); border-color: var(--green); }
+.copy-btn.copied:hover { background: var(--green); color: #fff; border-color: var(--green); }
+.resp-code { background: transparent; border: none; padding: 14px; margin: 0; font-family: monospace; font-size: 12px; white-space: pre-wrap; overflow-x: auto; max-height: 420px; overflow-y: auto; color: var(--text); }
+.resp-format { background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; font-family: monospace; font-size: 12px; white-space: pre-wrap; overflow-x: auto; max-height: 240px; overflow-y: auto; color: var(--text-muted); }
 .truncated-banner { margin-top: 8px; font-size: 12px; color: var(--yellow); }
 
 /* ---- error banner ---- */
-.error-banner { background: #3a1a1a; color: var(--red); border: 1px solid #5a2a2a; border-radius: var(--radius); padding: 6px 12px; font-size: 12px; }
+.error-banner { background: var(--err-banner-bg); color: var(--red); border: 1px solid var(--err-banner-border); border-radius: var(--radius); padding: 6px 12px; font-size: 12px; }

@@ -1,8 +1,26 @@
 // Request builder
 import { apiFetch, getToken } from './api.js';
 import { showResponse } from './response.js';
+import { introspect, unwrapType } from './graphql.js';
 
 let _current = null;
+let _gqlSchema = null;
+let _openapiSpec = null;
+
+async function ensureOpenApiSpec() {
+  if (_openapiSpec) return _openapiSpec;
+  try {
+    const { resp } = await apiFetch('/openapi.json');
+    if (resp.ok) _openapiSpec = await resp.json();
+  } catch { /* ignore */ }
+  return _openapiSpec;
+}
+
+function resolveRef(schema, spec) {
+  if (!schema?.$ref || !spec?.components?.schemas) return schema;
+  const name = schema.$ref.split('/').pop();
+  return spec.components.schemas[name] || schema;
+}
 
 export function loadEndpoint(endpoint) {
   _current = endpoint;
@@ -40,11 +58,11 @@ export function loadEndpoint(endpoint) {
   const querySection = document.getElementById('query-params-section');
   const queryContainer = document.getElementById('query-params');
   queryContainer.innerHTML = '';
-  const isListGet = endpoint.type === 'rest' && endpoint.method === 'GET' && !endpoint.path.includes('{');
+  const isListGet = endpoint.type === 'rest' && endpoint.method === 'GET' && !endpoint.path.includes('{') && !endpoint.noQuery;
   if (isListGet) {
     querySection.classList.remove('hidden');
-    queryContainer.appendChild(makeParamRow('offset', 'qp-offset', '0'));
-    queryContainer.appendChild(makeParamRow('limit', 'qp-limit', '20'));
+    queryContainer.appendChild(makeParamRow('page', 'qp-page', '1'));
+    queryContainer.appendChild(makeParamRow('page_size', 'qp-page-size', '20'));
   } else {
     querySection.classList.add('hidden');
   }
@@ -77,6 +95,9 @@ export function loadEndpoint(endpoint) {
   // Reset response
   document.getElementById('response-panel').classList.add('hidden');
 
+  // Response format
+  renderResponseFormat(endpoint);
+
   // Update send button state
   updateSendState(pathParams);
 }
@@ -105,6 +126,85 @@ function updateSendState(pathParams) {
     return el && el.value.trim() !== '';
   });
   send.disabled = !allFilled;
+}
+
+async function renderResponseFormat(endpoint) {
+  const section = document.getElementById('response-format-section');
+  const pre = document.getElementById('response-format-body');
+  section.classList.add('hidden');
+
+  let format = null;
+
+  if (endpoint.type === 'rest' && endpoint.op) {
+    const spec = await ensureOpenApiSpec();
+    const schemas = spec?.components?.schemas || {};
+    format = extractRestResponseFormat(endpoint.op, schemas);
+  } else if (endpoint.type === 'graphql' && endpoint.gqlField) {
+    format = await extractGqlResponseFormat(endpoint.gqlField);
+  }
+
+  if (format) {
+    pre.textContent = format;
+    section.classList.remove('hidden');
+  }
+}
+
+function extractRestResponseFormat(op, schemas) {
+  const resp200 = op.responses?.['200'];
+  if (!resp200) return null;
+  const schema = resp200.content?.['application/json']?.schema;
+  if (!schema) return null;
+  const val = schemaToExample(schema, schemas);
+  return JSON.stringify(val, null, 2);
+}
+
+function schemaToExample(schema, schemas = {}, depth = 0) {
+  if (depth > 4) return '...';
+  if (schema.$ref) schema = resolveRef(schema, { components: { schemas } });
+  if (schema.example !== undefined) return schema.example;
+
+  if (schema.type === 'object' && schema.properties) {
+    const obj = {};
+    for (const [key, val] of Object.entries(schema.properties)) {
+      obj[key] = schemaToExample(val, schemas, depth + 1);
+    }
+    return obj;
+  }
+  if (schema.type === 'array' && schema.items) {
+    return [schemaToExample(schema.items, schemas, depth + 1)];
+  }
+  if (schema.allOf && schema.allOf.length > 0) {
+    const merged = {};
+    for (const sub of schema.allOf) {
+      const resolved = sub.$ref ? resolveRef(sub, { components: { schemas } }) : sub;
+      const val = schemaToExample(resolved, schemas, depth + 1);
+      if (val && typeof val === 'object' && !Array.isArray(val)) {
+        Object.assign(merged, val);
+      }
+    }
+    return merged;
+  }
+  const typeMap = { integer: 0, number: 0.0, string: 'string', boolean: true };
+  if (typeMap[schema.type] !== undefined) return typeMap[schema.type];
+  return null;
+}
+
+async function extractGqlResponseFormat(gqlField) {
+  if (!_gqlSchema) {
+    _gqlSchema = await introspect();
+  }
+  if (!_gqlSchema) return null;
+
+  const typeName = unwrapType(gqlField.type);
+  const gqlType = (_gqlSchema.types || []).find(t => t.name === typeName);
+  if (!gqlType || gqlType.kind !== 'OBJECT' || !gqlType.fields) return null;
+
+  const obj = {};
+  for (const f of gqlType.fields) {
+    const ft = unwrapType(f.type);
+    obj[f.name] = ft;
+  }
+  return JSON.stringify(obj, null, 2);
 }
 
 export function initRequestBuilder() {
@@ -138,10 +238,10 @@ async function sendRequest() {
       url = url.replace(`{${p}}`, encodeURIComponent(val));
     }
     // Query params
-    const qpOffset = document.getElementById('qp-offset');
-    const qpLimit  = document.getElementById('qp-limit');
-    if (qpOffset && qpLimit) {
-      url += `?offset=${qpOffset.value}&limit=${qpLimit.value}`;
+    const qpPage = document.getElementById('qp-page');
+    const qpPageSize  = document.getElementById('qp-page-size');
+    if (qpPage && qpPageSize) {
+      url += `?page=${qpPage.value}&page_size=${qpPageSize.value}`;
     }
 
     let bodyStr;

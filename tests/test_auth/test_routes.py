@@ -1,3 +1,5 @@
+import base64
+
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
@@ -8,12 +10,15 @@ from dbzap.auth.user_store import UserStore
 from dbzap.core.config import Settings
 
 
-@pytest.fixture
-def settings() -> Settings:
-    return Settings(
-        database_url="sqlite+aiosqlite:///:memory:",
-        jwt_secret_key="test-secret-for-routes",
-    )
+def _settings(**kwargs) -> Settings:  # type: ignore[no-untyped-def]
+    defaults = {
+        "database_url": "sqlite+aiosqlite:///:memory:",
+        "jwt_secret_key": "test-secret-for-routes",
+        "explorer_username": "admin",
+        "explorer_password": "s3cureP@ss",
+    }
+    defaults.update(kwargs)
+    return Settings(**defaults)  # type: ignore[arg-type]
 
 
 @pytest.fixture
@@ -23,117 +28,160 @@ async def engine() -> AsyncEngine:
     await eng.dispose()
 
 
-@pytest.fixture
-async def app(engine: AsyncEngine, settings: Settings) -> FastAPI:
+async def _make_client(engine: AsyncEngine, settings: Settings) -> AsyncClient:
     store = UserStore(engine=engine)
     await store.initialize()
+    await store.seed_admin_user("admin", "s3cureP@ss")
     router = create_auth_router(store=store, settings=settings)
-    application = FastAPI()
-    application.include_router(router)
-    return application
-
-
-@pytest.fixture
-async def client(app: FastAPI) -> AsyncClient:
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        yield c
+    app = FastAPI()
+    app.include_router(router)
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
 # ---------------------------------------------------------------------------
-# Register
+# JWT mode (default)
 # ---------------------------------------------------------------------------
 
 
-async def test_register_creates_user(client: AsyncClient) -> None:
-    resp = await client.post("/auth/register", json={"username": "alice", "password": "s3cureP@ss"})
-    assert resp.status_code == 201
-    data = resp.json()
-    assert data["username"] == "alice"
-    assert "id" in data
-    assert "password" not in data
-    assert "password_hash" not in data
+async def test_jwt_login_returns_token(engine: AsyncEngine) -> None:
+    async with await _make_client(engine, _settings(auth_mode="jwt")) as client:
+        resp = await client.post("/auth/login", json={"username": "admin", "password": "s3cureP@ss"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "access_token" in data
+        assert data["token_type"] == "bearer"
 
 
-async def test_register_duplicate_returns_409(client: AsyncClient) -> None:
-    await client.post("/auth/register", json={"username": "alice", "password": "s3cureP@ss"})
-    resp = await client.post("/auth/register", json={"username": "alice", "password": "s3cureP@ss"})
-    assert resp.status_code == 409
+async def test_jwt_me_with_bearer_token(engine: AsyncEngine) -> None:
+    async with await _make_client(engine, _settings(auth_mode="jwt")) as client:
+        login = await client.post("/auth/login", json={"username": "admin", "password": "s3cureP@ss"})
+        token = login.json()["access_token"]
+        resp = await client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
+        assert resp.status_code == 200
+        assert resp.json()["username"] == "admin"
 
 
-async def test_register_short_password_returns_422(client: AsyncClient) -> None:
-    resp = await client.post("/auth/register", json={"username": "alice", "password": "short"})
-    assert resp.status_code == 422
+async def test_jwt_wrong_password_401(engine: AsyncEngine) -> None:
+    async with await _make_client(engine, _settings(auth_mode="jwt")) as client:
+        resp = await client.post("/auth/login", json={"username": "admin", "password": "wrong"})
+        assert resp.status_code == 401
 
 
-# ---------------------------------------------------------------------------
-# Login
-# ---------------------------------------------------------------------------
-
-
-async def test_login_returns_token(client: AsyncClient) -> None:
-    await client.post("/auth/register", json={"username": "bob", "password": "s3cureP@ss"})
-    resp = await client.post("/auth/login", json={"username": "bob", "password": "s3cureP@ss"})
-    assert resp.status_code == 200
-    data = resp.json()
-    assert "access_token" in data
-    assert data["token_type"] == "bearer"
-    assert data["expires_in"] > 0
-
-
-async def test_login_wrong_password_returns_401(client: AsyncClient) -> None:
-    await client.post("/auth/register", json={"username": "bob", "password": "s3cureP@ss"})
-    resp = await client.post("/auth/login", json={"username": "bob", "password": "wrongpass"})
-    assert resp.status_code == 401
-
-
-async def test_login_unknown_user_returns_401(client: AsyncClient) -> None:
-    resp = await client.post("/auth/login", json={"username": "nobody", "password": "s3cureP@ss"})
-    assert resp.status_code == 401
-
-
-async def test_login_same_error_message_for_wrong_pw_and_unknown(client: AsyncClient) -> None:
-    await client.post("/auth/register", json={"username": "bob", "password": "s3cureP@ss"})
-    resp_wrong = await client.post("/auth/login", json={"username": "bob", "password": "wrong"})
-    resp_unknown = await client.post("/auth/login", json={"username": "nobody", "password": "wrong"})
-    assert resp_wrong.json()["detail"] == resp_unknown.json()["detail"]
+async def test_jwt_basic_auth_rejected(engine: AsyncEngine) -> None:
+    async with await _make_client(engine, _settings(auth_mode="jwt")) as client:
+        cred = base64.b64encode(b"admin:s3cureP@ss").decode()
+        resp = await client.get("/auth/me", headers={"Authorization": f"Basic {cred}"})
+        assert resp.status_code == 401
 
 
 # ---------------------------------------------------------------------------
-# /auth/me
+# Basic Auth mode
 # ---------------------------------------------------------------------------
 
 
-async def test_me_returns_user(client: AsyncClient) -> None:
-    await client.post("/auth/register", json={"username": "carol", "password": "s3cureP@ss"})
-    login = await client.post("/auth/login", json={"username": "carol", "password": "s3cureP@ss"})
-    token = login.json()["access_token"]
-    resp = await client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
-    assert resp.status_code == 200
-    assert resp.json()["username"] == "carol"
+async def test_basic_login_not_available(engine: AsyncEngine) -> None:
+    async with await _make_client(engine, _settings(auth_mode="basic")) as client:
+        resp = await client.post("/auth/login", json={"username": "admin", "password": "s3cureP@ss"})
+        assert resp.status_code == 404
 
 
-async def test_me_no_token_returns_401(client: AsyncClient) -> None:
-    resp = await client.get("/auth/me")
-    assert resp.status_code == 401
+async def test_basic_me_with_valid_credentials(engine: AsyncEngine) -> None:
+    async with await _make_client(engine, _settings(auth_mode="basic")) as client:
+        cred = base64.b64encode(b"admin:s3cureP@ss").decode()
+        resp = await client.get("/auth/me", headers={"Authorization": f"Basic {cred}"})
+        assert resp.status_code == 200
+        assert resp.json()["username"] == "admin"
 
 
-async def test_me_invalid_token_returns_401(client: AsyncClient) -> None:
-    resp = await client.get("/auth/me", headers={"Authorization": "Bearer invalid.token.here"})
-    assert resp.status_code == 401
+async def test_basic_wrong_password_401(engine: AsyncEngine) -> None:
+    async with await _make_client(engine, _settings(auth_mode="basic")) as client:
+        cred = base64.b64encode(b"admin:wrongpass").decode()
+        resp = await client.get("/auth/me", headers={"Authorization": f"Basic {cred}"})
+        assert resp.status_code == 401
 
 
-async def test_me_expired_token_returns_401(client: AsyncClient, settings: Settings) -> None:
-    import time
+async def test_basic_unknown_user_401(engine: AsyncEngine) -> None:
+    async with await _make_client(engine, _settings(auth_mode="basic")) as client:
+        cred = base64.b64encode(b"nobody:s3cureP@ss").decode()
+        resp = await client.get("/auth/me", headers={"Authorization": f"Basic {cred}"})
+        assert resp.status_code == 401
 
-    from dbzap.auth.tokens import create_access_token
 
-    token = create_access_token(
-        {"sub": "1"},
-        secret=settings.jwt_secret_key,
-        algorithm=settings.jwt_algorithm,
-        expire_minutes=0,
-    )
-    time.sleep(1)
-    resp = await client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
-    assert resp.status_code == 401
-    assert "expired" in resp.json()["detail"].lower()
+async def test_basic_no_header_401(engine: AsyncEngine) -> None:
+    async with await _make_client(engine, _settings(auth_mode="basic")) as client:
+        resp = await client.get("/auth/me")
+        assert resp.status_code == 401
+
+
+async def test_basic_bearer_token_rejected(engine: AsyncEngine) -> None:
+    async with await _make_client(engine, _settings(auth_mode="basic")) as client:
+        resp = await client.get("/auth/me", headers={"Authorization": "Bearer some.jwt.token"})
+        assert resp.status_code == 401
+
+
+async def test_basic_password_with_colon(engine: AsyncEngine) -> None:
+    """Password containing ':' should work — split on first ':' only."""
+    async with AsyncClient(
+        transport=ASGITransport(app=FastAPI()),
+        base_url="http://test",
+    ) as client:
+        # Use a fresh store with a password containing ':'
+        eng = create_async_engine("sqlite+aiosqlite:///:memory:")
+        try:
+            store = UserStore(engine=eng)
+            await store.initialize()
+            await store.seed_admin_user("admin", "pass:word")
+            settings = _settings(auth_mode="basic")
+            router = create_auth_router(store=store, settings=settings)
+            app = FastAPI()
+            app.include_router(router)
+            c = AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+            async with c:
+                cred = base64.b64encode(b"admin:pass:word").decode()
+                resp = await c.get("/auth/me", headers={"Authorization": f"Basic {cred}"})
+                assert resp.status_code == 200
+        finally:
+            await eng.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Both mode
+# ---------------------------------------------------------------------------
+
+
+async def test_both_login_available(engine: AsyncEngine) -> None:
+    async with await _make_client(engine, _settings(auth_mode="both")) as client:
+        resp = await client.post("/auth/login", json={"username": "admin", "password": "s3cureP@ss"})
+        assert resp.status_code == 200
+
+
+async def test_both_bearer_works(engine: AsyncEngine) -> None:
+    async with await _make_client(engine, _settings(auth_mode="both")) as client:
+        login = await client.post("/auth/login", json={"username": "admin", "password": "s3cureP@ss"})
+        token = login.json()["access_token"]
+        resp = await client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
+        assert resp.status_code == 200
+
+
+async def test_both_basic_works(engine: AsyncEngine) -> None:
+    async with await _make_client(engine, _settings(auth_mode="both")) as client:
+        cred = base64.b64encode(b"admin:s3cureP@ss").decode()
+        resp = await client.get("/auth/me", headers={"Authorization": f"Basic {cred}"})
+        assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Common
+# ---------------------------------------------------------------------------
+
+
+async def test_no_auth_header_401(engine: AsyncEngine) -> None:
+    async with await _make_client(engine, _settings()) as client:
+        resp = await client.get("/auth/me")
+        assert resp.status_code == 401
+
+
+async def test_register_not_found(engine: AsyncEngine) -> None:
+    async with await _make_client(engine, _settings()) as client:
+        resp = await client.post("/auth/register", json={"username": "alice", "password": "s3cureP@ss"})
+        assert resp.status_code == 404

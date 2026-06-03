@@ -74,3 +74,37 @@ async def test_password_hash_stored_not_plaintext(store: UserStore) -> None:
     assert user is not None
     assert user.password_hash != "s3cureP@ss"
     assert user.password_hash == hashed
+
+
+async def test_seed_admin_user_creates_user(store: UserStore) -> None:
+    await store.seed_admin_user("admin", "s3cureP@ss")
+    user = await store.get_by_username("admin")
+    assert user is not None
+    assert user.username == "admin"
+    from dbzap.auth.passwords import verify_password
+
+    assert verify_password("s3cureP@ss", user.password_hash)
+
+
+async def test_seed_admin_user_updates_password(store: UserStore) -> None:
+    await store.seed_admin_user("admin", "old_password")
+    user1 = await store.get_by_username("admin")
+    old_hash = user1.password_hash
+
+    await store.seed_admin_user("admin", "new_password")
+    user2 = await store.get_by_username("admin")
+    assert user2.password_hash != old_hash
+    from dbzap.auth.passwords import verify_password
+
+    assert verify_password("new_password", user2.password_hash)
+
+
+async def test_seed_admin_user_idempotent(store: UserStore) -> None:
+    await store.seed_admin_user("admin", "s3cureP@ss")
+    user1 = await store.get_by_username("admin")
+    await store.seed_admin_user("admin", "s3cureP@ss")
+    user2 = await store.get_by_username("admin")
+    from dbzap.auth.passwords import verify_password
+
+    assert verify_password("s3cureP@ss", user1.password_hash)
+    assert verify_password("s3cureP@ss", user2.password_hash)

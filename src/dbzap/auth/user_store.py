@@ -1,7 +1,4 @@
-from typing import Any
-
-from sqlalchemy import Column, DateTime, Integer, MetaData, String, Table, func, insert, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import Column, DateTime, Integer, MetaData, String, Table, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from dbzap.auth.models import UserRecord
@@ -26,18 +23,30 @@ class UserStore:
         async with self._engine.begin() as conn:
             await conn.run_sync(_METADATA.create_all)
 
+    async def seed_admin_user(self, username: str, password: str) -> None:
+        from dbzap.auth.passwords import hash_password, verify_password
+
+        pw_hash = hash_password(password)
+        existing = await self.get_by_username(username)
+        if existing is None:
+            await self.create_user(username, pw_hash)
+        elif not verify_password(password, existing.password_hash):
+            stmt = (
+                update(_users_table)
+                .where(_users_table.c.username == username)
+                .values(password_hash=pw_hash)
+            )
+            async with self._engine.begin() as conn:
+                await conn.execute(stmt)
+
     async def create_user(self, username: str, password_hash: str) -> UserRecord:
-        stmt = (
-            insert(_users_table)
-            .values(username=username, password_hash=password_hash)
-            .returning(_users_table.c.id)
-        )
+        stmt = insert(_users_table).values(username=username, password_hash=password_hash)
         async with self._engine.begin() as conn:
             result = await conn.execute(stmt)
-            row = result.fetchone()
-        if row is None:
+            user_id = result.lastrowid
+        if user_id is None:
             raise RuntimeError("Failed to insert user")
-        return UserRecord(id=row[0], username=username, password_hash=password_hash)
+        return UserRecord(id=user_id, username=username, password_hash=password_hash)
 
     async def get_by_username(self, username: str) -> UserRecord | None:
         stmt = select(_users_table).where(_users_table.c.username == username)

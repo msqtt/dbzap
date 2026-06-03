@@ -141,39 +141,39 @@ class TestSchemaStructure:
 
 class TestListQuery:
     async def test_list_users_returns_empty_initially(self, client: AsyncClient) -> None:
-        result = await _gql(client, "{ users { id name email } }")
+        result = await _gql(client, "{ users { items { id name email } } }")
         assert result.get("errors") is None
-        assert result["data"]["users"] == []
+        assert result["data"]["users"]["items"] == []
 
     async def test_list_users_returns_inserted_rows(self, client: AsyncClient) -> None:
         await _gql(
             client,
             "mutation { createUsers(input: { name: \"Alice\", email: \"a@x.com\" }) { id } }",
         )
-        result = await _gql(client, "{ users { name } }")
-        assert result["data"]["users"][0]["name"] == "Alice"
+        result = await _gql(client, "{ users { items { name } } }")
+        assert result["data"]["users"]["items"][0]["name"] == "Alice"
 
-    async def test_list_pagination_limit(self, client: AsyncClient) -> None:
+    async def test_list_pagination_page_size(self, client: AsyncClient) -> None:
         for i in range(5):
             await _gql(
                 client,
                 f'mutation {{ createUsers(input: {{ name: "U{i}", email: "u{i}@x.com" }}) {{ id }} }}',
             )
-        result = await _gql(client, "{ users(limit: 2) { id } }")
-        assert len(result["data"]["users"]) == 2
+        result = await _gql(client, "{ users(pageSize: 2) { items { id } } }")
+        assert len(result["data"]["users"]["items"]) == 2
 
-    async def test_list_pagination_offset(self, client: AsyncClient) -> None:
+    async def test_list_pagination_page(self, client: AsyncClient) -> None:
         for i in range(4):
             await _gql(
                 client,
                 f'mutation {{ createUsers(input: {{ name: "U{i}", email: "off{i}@x.com" }}) {{ id }} }}',
             )
-        all_rows = (await _gql(client, "{ users(limit: 4) { id } }"))["data"]["users"]
-        page2 = (await _gql(client, "{ users(limit: 2, offset: 2) { id } }"))["data"]["users"]
+        all_rows = (await _gql(client, "{ users(pageSize: 4) { items { id } } }"))["data"]["users"]["items"]
+        page2 = (await _gql(client, "{ users(pageSize: 2, page: 2) { items { id } } }"))["data"]["users"]["items"]
         assert page2[0]["id"] == all_rows[2]["id"]
 
-    async def test_list_limit_clamped_to_100(self, client: AsyncClient) -> None:
-        result = await _gql(client, "{ users(limit: 9999) { id } }")
+    async def test_list_page_size_clamped_to_100(self, client: AsyncClient) -> None:
+        result = await _gql(client, "{ users(pageSize: 9999) { items { id } } }")
         assert result.get("errors") is None
 
 
@@ -351,9 +351,9 @@ class TestNoPkTable:
         assert result["data"]["createAuditLog"]["message"] == "hello"
 
     async def test_no_pk_list(self, client: AsyncClient) -> None:
-        result = await _gql(client, "{ auditLog { message } }")
+        result = await _gql(client, "{ auditLog { items { message } } }")
         assert result.get("errors") is None
-        assert isinstance(result["data"]["auditLog"], list)
+        assert isinstance(result["data"]["auditLog"]["items"], list)
 
     def test_no_pk_no_byid_field(self, generator: GraphqlApiGenerator, tables: list[TableInfo]) -> None:
         schema = generator.generate(tables)

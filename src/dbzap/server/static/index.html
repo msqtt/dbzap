@@ -6,6 +6,14 @@
   <title>dbzap Explorer</title>
   <link rel="stylesheet" href="/explorer/static/css/style.css" />
   <link rel="stylesheet" href="/explorer/static/css/dashboard.css" />
+  <script>
+    // Apply theme immediately to avoid flash of wrong theme
+    (function () {
+      const stored = localStorage.getItem('dbzap-theme') || 'system';
+      const dark = stored === 'dark' || (stored === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+      document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+    })();
+  </script>
 </head>
 <body>
   <!-- Login overlay -->
@@ -41,6 +49,7 @@
       <div class="topnav-right">
         <span id="health-dot" class="status-dot" title="Service health"></span>
         <span id="current-user" class="user-label"></span>
+        <button id="theme-btn" class="btn btn-ghost btn-sm" title="Toggle theme"></button>
         <button id="logout-btn" class="btn btn-ghost">Logout</button>
       </div>
     </nav>
@@ -83,6 +92,10 @@
                 <span id="body-error" class="error-msg hidden"></span>
               </div>
             </div>
+            <div id="response-format-section" class="param-section hidden">
+              <h3>Response Format</h3>
+              <pre id="response-format-body" class="resp-format"></pre>
+            </div>
             <div class="send-bar">
               <button id="send-btn" class="btn btn-primary">Send</button>
             </div>
@@ -94,8 +107,26 @@
             <span id="resp-time" class="resp-time"></span>
             <button id="toggle-resp-headers" class="btn btn-ghost btn-sm">Headers</button>
           </div>
-          <div id="resp-headers-section" class="resp-headers hidden"></div>
-          <pre id="resp-body" class="resp-body"></pre>
+          <div id="resp-headers-section" class="resp-code-wrap hidden">
+            <div class="resp-code-toolbar">
+              <span class="resp-code-label">Response Headers</span>
+              <button id="copy-headers-btn" class="copy-btn" title="Copy headers">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                <span>Copy</span>
+              </button>
+            </div>
+            <pre id="resp-headers-body" class="resp-code"></pre>
+          </div>
+          <div class="resp-code-wrap">
+            <div class="resp-code-toolbar">
+              <span class="resp-code-label">Response Body</span>
+              <button id="copy-body-btn" class="copy-btn" title="Copy body">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                <span>Copy</span>
+              </button>
+            </div>
+            <pre id="resp-body" class="resp-code"></pre>
+          </div>
           <div id="resp-truncated" class="truncated-banner hidden">
             Response truncated. <button id="show-full-resp" class="btn btn-ghost btn-sm">Show full</button>
           </div>

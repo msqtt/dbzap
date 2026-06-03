@@ -12,7 +12,7 @@ from typing import Any, Optional
 import strawberry
 import structlog
 from fastapi import FastAPI
-from sqlalchemy import Table, Column, MetaData, Integer, String, Float, Boolean
+from sqlalchemy import Table, Column, MetaData, Integer, String, Float, Boolean, func
 from sqlalchemy import select, insert, update, delete
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -174,17 +174,40 @@ def _extract_fn_name(src: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _list_resolver(sa_tbl: Table, engine: AsyncEngine, out_type: type[Any]) -> Any:
+def _make_pagination_type(out_type: type[Any], ns: dict[str, Any]) -> type[Any]:
+    """Create a Strawberry type wrapping list results with pagination metadata."""
     out_name = out_type.__name__
+    pag_name = out_name + "Pagination"
+    fields = [
+        ("items", list[out_type], dataclasses.field(default_factory=list)),  # type: ignore[valid-type]
+        ("page", int, dataclasses.field(default=1)),
+        ("page_size", int, dataclasses.field(default=20)),
+        ("total", int, dataclasses.field(default=0)),
+        ("pages", int, dataclasses.field(default=0)),
+    ]
+    dc = dataclasses.make_dataclass(pag_name, fields)
+    dc.__module__ = _MOD
+    t = strawberry.type(dc)
+    ns[pag_name] = t
+    return t
+
+
+def _list_resolver(sa_tbl: Table, engine: AsyncEngine, out_type: type[Any], pag_type: type[Any]) -> Any:
+    out_name = out_type.__name__
+    pag_name = pag_type.__name__
     src = f"""
-async def resolver(offset: int = 0, limit: int = 20) -> list[{out_name}]:
-    offset = max(0, offset)
-    limit = max(1, min(100, limit))
+async def resolver(page: int = 1, page_size: int = 20) -> {pag_name}:
+    page = max(1, page)
+    page_size = max(1, min(100, page_size))
+    offset = (page - 1) * page_size
     async with engine.connect() as conn:
-        rows = (await conn.execute(select(sa_tbl).offset(offset).limit(limit))).mappings().all()
-    return [{out_name}(**dict(r)) for r in rows]
+        total = (await conn.execute(select(func.count()).select_from(sa_tbl))).scalar_one()
+        rows = (await conn.execute(select(sa_tbl).offset(offset).limit(page_size))).mappings().all()
+    pages = (total + page_size - 1) // page_size if total else 0
+    items = [{out_name}(**dict(r)) for r in rows]
+    return {pag_name}(items=items, page=page, page_size=page_size, total=total, pages=pages)
 """
-    return _build_resolver(src, {out_name: out_type, "sa_tbl": sa_tbl, "engine": engine})
+    return _build_resolver(src, {out_name: out_type, pag_name: pag_type, "sa_tbl": sa_tbl, "engine": engine})
 
 
 def _byid_single_resolver(sa_tbl: Table, pk: str, engine: AsyncEngine, out_type: type[Any]) -> Any:
@@ -327,10 +350,15 @@ class GraphqlApiGenerator:
             # Update module-level namespace so resolvers can reference these types
             sys.modules[_MOD].__dict__.update(ns)
 
+            # Pagination type for list results
+            pag_type = _make_pagination_type(out_type, ns)
+            extra_types.append(pag_type)
+            sys.modules[_MOD].__dict__.update(ns)
+
             # List query
-            lr = _list_resolver(sa_tbl, self._engine, out_type)
+            lr = _list_resolver(sa_tbl, self._engine, out_type, pag_type)
             query_fields[camel] = strawberry.field(resolver=lr)
-            query_annotations[camel] = list[out_type]  # type: ignore[valid-type]
+            query_annotations[camel] = pag_type
 
             # By-ID query
             if pk_cols:

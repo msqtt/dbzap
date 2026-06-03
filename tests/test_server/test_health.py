@@ -8,11 +8,14 @@ from dbzap.server.app import create_app
 
 
 def _settings(**kwargs) -> Settings:  # type: ignore[no-untyped-def]
-    return Settings(
-        database_url="sqlite+aiosqlite:///:memory:",
-        jwt_secret_key="test-health-secret",
-        **kwargs,
-    )
+    defaults = {
+        "database_url": "sqlite+aiosqlite:///:memory:",
+        "jwt_secret_key": "test-health-secret",
+        "explorer_username": "admin",
+        "explorer_password": "s3cureP@ss",
+    }
+    defaults.update(kwargs)
+    return Settings(**defaults)  # type: ignore[arg-type]
 
 
 @pytest.fixture
@@ -123,8 +126,7 @@ async def test_detail_requires_auth(client: AsyncClient) -> None:
 
 
 async def test_detail_returns_200_with_valid_token(client: AsyncClient) -> None:
-    await client.post("/auth/register", json={"username": "alice", "password": "s3cureP@ss"})
-    login = await client.post("/auth/login", json={"username": "alice", "password": "s3cureP@ss"})
+    login = await client.post("/auth/login", json={"username": "admin", "password": "s3cureP@ss"})
     token = login.json()["access_token"]
 
     resp = await client.get("/healthz/detail", headers={"Authorization": f"Bearer {token}"})
@@ -132,8 +134,7 @@ async def test_detail_returns_200_with_valid_token(client: AsyncClient) -> None:
 
 
 async def test_detail_body_shape(client: AsyncClient) -> None:
-    await client.post("/auth/register", json={"username": "bob", "password": "s3cureP@ss"})
-    login = await client.post("/auth/login", json={"username": "bob", "password": "s3cureP@ss"})
+    login = await client.post("/auth/login", json={"username": "admin", "password": "s3cureP@ss"})
     token = login.json()["access_token"]
 
     resp = await client.get("/healthz/detail", headers={"Authorization": f"Bearer {token}"})

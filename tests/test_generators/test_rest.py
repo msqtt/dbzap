@@ -191,37 +191,51 @@ class TestList:
         resp = await client.get("/api/users")
         assert resp.status_code == 200
 
-    async def test_list_returns_array(self, client: AsyncClient) -> None:
+    async def test_list_returns_paginated_dict(self, client: AsyncClient) -> None:
         resp = await client.get("/api/users")
-        assert isinstance(resp.json(), list)
+        body = resp.json()
+        assert isinstance(body, dict)
+        assert "items" in body
+        assert "page" in body
+        assert "page_size" in body
+        assert "total" in body
+        assert "pages" in body
 
-    async def test_list_pagination_limit(self, client: AsyncClient) -> None:
+    async def test_list_pagination_page_size(self, client: AsyncClient) -> None:
         await self._seed(client)
-        resp = await client.get("/api/users?limit=2")
-        assert len(resp.json()) == 2
+        resp = await client.get("/api/users?page_size=2")
+        assert len(resp.json()["items"]) == 2
 
-    async def test_list_pagination_offset(self, client: AsyncClient) -> None:
+    async def test_list_pagination_page(self, client: AsyncClient) -> None:
         await self._seed(client)
-        all_rows: list[Any] = (await client.get("/api/users?limit=5")).json()
-        page2: list[Any] = (await client.get("/api/users?limit=2&offset=2")).json()
+        all_rows: list[Any] = (await client.get("/api/users?page_size=5")).json()["items"]
+        page2: list[Any] = (await client.get("/api/users?page_size=2&page=2")).json()["items"]
         assert page2[0]["id"] == all_rows[2]["id"]
 
-    async def test_list_limit_clamped_to_100(self, client: AsyncClient) -> None:
+    async def test_list_page_size_clamped_to_100(self, client: AsyncClient) -> None:
         for i in range(5):
             await client.post("/api/users", json={"name": f"U{i}", "email": f"ul{i}@x.com"})
-        resp = await client.get("/api/users?limit=9999")
+        resp = await client.get("/api/users?page_size=9999")
         assert resp.status_code == 200
-        assert len(resp.json()) <= 100
+        assert len(resp.json()["items"]) <= 100
 
-    async def test_list_default_limit_20(self, client: AsyncClient) -> None:
+    async def test_list_default_page_size_20(self, client: AsyncClient) -> None:
         for i in range(25):
             await client.post("/api/users", json={"name": f"U{i}", "email": f"def{i}@x.com"})
         resp = await client.get("/api/users")
-        assert len(resp.json()) == 20
+        assert len(resp.json()["items"]) == 20
 
-    async def test_list_negative_offset_clamped(self, client: AsyncClient) -> None:
-        resp = await client.get("/api/users?offset=-5")
+    async def test_list_negative_page_clamped(self, client: AsyncClient) -> None:
+        resp = await client.get("/api/users?page=-5")
         assert resp.status_code == 200
+
+    async def test_list_pagination_metadata(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        body = (await client.get("/api/users?page_size=2")).json()
+        assert body["page"] == 1
+        assert body["page_size"] == 2
+        assert body["total"] == 5
+        assert body["pages"] == 3
 
 
 # ---------------------------------------------------------------------------
@@ -379,4 +393,4 @@ class TestNoPkTable:
     async def test_no_pk_list(self, client: AsyncClient) -> None:
         resp = await client.get("/api/audit_log")
         assert resp.status_code == 200
-        assert isinstance(resp.json(), list)
+        assert "items" in resp.json()

@@ -6,6 +6,59 @@ import { initResponseViewer } from './response.js';
 import { initDashboard, startPolling, stopPolling } from './dashboard.js';
 import { updateHealthDot } from './health.js';
 
+// ---- Theme ----
+const THEME_KEY = 'dbzap-theme';
+const THEMES = ['system', 'light', 'dark'];
+const THEME_ICONS = { system: '\u25C9', light: '\u2600', dark: '\u263E' };
+
+function getStoredTheme() {
+  return localStorage.getItem(THEME_KEY) || 'system';
+}
+
+function effectiveTheme(pref) {
+  if (pref === 'system') return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  return pref;
+}
+
+function applyTheme(pref) {
+  document.documentElement.setAttribute('data-theme', effectiveTheme(pref));
+  const btn = document.getElementById('theme-btn');
+  if (btn) btn.textContent = THEME_ICONS[pref] || THEME_ICONS.system;
+}
+
+function initTheme() {
+  const pref = getStoredTheme();
+  applyTheme(pref);
+
+  const btn = document.getElementById('theme-btn');
+  if (btn) {
+    btn.addEventListener('click', () => {
+      const current = getStoredTheme();
+      const next = THEMES[(THEMES.indexOf(current) + 1) % THEMES.length];
+      localStorage.setItem(THEME_KEY, next);
+      applyTheme(next);
+    });
+  }
+
+  // React to OS preference changes when in system mode
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+    if (getStoredTheme() === 'system') applyTheme('system');
+  });
+}
+
+// ---- Credential pre-fill ----
+async function preFillCredentials() {
+  try {
+    const resp = await fetch('/explorer/config');
+    if (!resp.ok) return;
+    const cfg = await resp.json();
+    if (cfg.username) document.getElementById('username').value = cfg.username;
+    if (cfg.password) document.getElementById('password').value = cfg.password;
+  } catch {
+    // Silently ignore — login form stays functional
+  }
+}
+
 // Exported so dashboard.js can call it
 export function switchTab(name) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
@@ -16,10 +69,13 @@ export function switchTab(name) {
 }
 
 async function init() {
+  initTheme();
+
   if (isLoggedIn()) {
     showApp();
   } else {
     showLogin();
+    preFillCredentials();
   }
 }
 
@@ -63,6 +119,7 @@ async function showApp() {
     clearToken();
     stopPolling();
     showLogin();
+    preFillCredentials();
   });
 
   // Init sub-modules

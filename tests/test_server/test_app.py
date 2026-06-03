@@ -8,11 +8,14 @@ from dbzap.server.app import create_app
 
 
 def _settings(**kwargs) -> Settings:  # type: ignore[no-untyped-def]
-    return Settings(
-        database_url="sqlite+aiosqlite:///:memory:",
-        jwt_secret_key="test-bootstrap-secret",
-        **kwargs,
-    )
+    defaults = {
+        "database_url": "sqlite+aiosqlite:///:memory:",
+        "jwt_secret_key": "test-bootstrap-secret",
+        "explorer_username": "admin",
+        "explorer_password": "s3cureP@ss",
+    }
+    defaults.update(kwargs)
+    return Settings(**defaults)  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -29,7 +32,6 @@ async def test_auth_routes_always_mounted() -> None:
     for mode in ("rest", "graphql", "both"):
         app = await create_app(settings=_settings(api_mode=mode))
         routes = [r.path for r in app.routes]  # type: ignore[attr-defined]
-        assert any("/auth/register" in p for p in routes), f"mode={mode} missing /auth/register"
         assert any("/auth/login" in p for p in routes), f"mode={mode} missing /auth/login"
         assert any("/auth/me" in p for p in routes), f"mode={mode} missing /auth/me"
 
@@ -103,15 +105,30 @@ async def test_users_internal_table_not_in_graphql_schema() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_register_and_login_end_to_end() -> None:
+async def test_seeded_admin_can_login() -> None:
     app = await create_app(settings=_settings())
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        reg = await c.post("/auth/register", json={"username": "alice", "password": "s3cureP@ss"})
-        assert reg.status_code == 201
-
-        login = await c.post("/auth/login", json={"username": "alice", "password": "s3cureP@ss"})
+        login = await c.post("/auth/login", json={"username": "admin", "password": "s3cureP@ss"})
         assert login.status_code == 200
         assert "access_token" in login.json()
+
+
+async def test_openapi_json_requires_auth() -> None:
+    app = await create_app(settings=_settings(api_mode="rest"))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        resp = await c.get("/openapi.json")
+    assert resp.status_code == 401
+
+
+async def test_openapi_json_returns_schema_when_authenticated() -> None:
+    app = await create_app(settings=_settings(api_mode="rest"))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        login = await c.post("/auth/login", json={"username": "admin", "password": "s3cureP@ss"})
+        token = login.json()["access_token"]
+        resp = await c.get("/openapi.json", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body.get("openapi", "").startswith("3")
 
 
 async def test_missing_jwt_secret_raises_at_startup() -> None:

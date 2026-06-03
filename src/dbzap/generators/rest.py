@@ -8,7 +8,7 @@ import structlog
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, create_model
-from sqlalchemy import Table, Column, MetaData, select, insert, update, delete, text
+from sqlalchemy import Table, Column, MetaData, select, insert, update, delete, text, func
 from sqlalchemy import Integer, String, Float, Boolean, Numeric
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -79,6 +79,20 @@ def _make_response_model(table: TableInfo) -> type[BaseModel]:
     return create_model(name, **fields)
 
 
+def _make_pagination_model(response_model_cls: type[BaseModel], table_name: str) -> type[BaseModel]:
+    """Create a paginated list response model with items, page, page_size, total, pages."""
+    item_list_type = list[response_model_cls]  # type: ignore[valid-type]
+    name = _pascal(table_name) + "Pagination"
+    return create_model(
+        name,
+        items=(item_list_type, ...),
+        page=(int, ...),
+        page_size=(int, ...),
+        total=(int, ...),
+        pages=(int, ...),
+    )
+
+
 def _pascal(s: str) -> str:
     return "".join(w.capitalize() for w in re.split(r"[_\s]+", s))
 
@@ -126,6 +140,7 @@ class RestApiGenerator:
         create_model_cls = _make_create_model(table)
         update_model_cls = _make_update_model(table)
         response_model_cls = _make_response_model(table)
+        pagination_model_cls = _make_pagination_model(response_model_cls, table.name)
         engine = self._engine
 
         has_pk = len(pk_cols) > 0
@@ -175,19 +190,30 @@ class RestApiGenerator:
             from fastapi.responses import JSONResponse
             return JSONResponse(status_code=201, content=dict(row) if row else cleaned)
 
-        app.add_api_route(prefix, create_row, methods=["POST"])
+        app.add_api_route(prefix, create_row, methods=["POST"],
+                          responses={201: {"model": response_model_cls}})
 
         # --- GET (list) ---
-        async def list_rows(offset: int = 0, limit: int = 20) -> list[dict[str, Any]]:
-            offset = max(0, offset)
-            limit = max(1, min(100, limit))
+        async def list_rows(page: int = 1, page_size: int = 20) -> dict[str, Any]:
+            page = max(1, page)
+            page_size = max(1, min(100, page_size))
+            offset = (page - 1) * page_size
             async with engine.connect() as conn:
+                total: int = (await conn.execute(select(func.count()).select_from(sa_tbl))).scalar_one()
                 rows = (
-                    await conn.execute(select(sa_tbl).offset(offset).limit(limit))
+                    await conn.execute(select(sa_tbl).offset(offset).limit(page_size))
                 ).mappings().all()
-            return [dict(r) for r in rows]
+            pages = (total + page_size - 1) // page_size if total else 0
+            return {
+                "items": [dict(r) for r in rows],
+                "page": page,
+                "page_size": page_size,
+                "total": total,
+                "pages": pages,
+            }
 
-        app.add_api_route(prefix, list_rows, methods=["GET"])
+        app.add_api_route(prefix, list_rows, methods=["GET"],
+                          responses={200: {"model": pagination_model_cls}})
 
         if not has_pk:
             return
@@ -216,7 +242,8 @@ class RestApiGenerator:
                     raise HTTPException(status_code=404, detail="Not found")
                 return dict(row)
 
-            app.add_api_route(prefix + "/{pk}", get_row, methods=["GET"])
+            app.add_api_route(prefix + "/{pk}", get_row, methods=["GET"],
+                              responses={200: {"model": response_model_cls}})
 
             # --- PUT (full update) ---
             async def full_update(pk: int, request: Request) -> dict[str, Any]:
@@ -237,7 +264,8 @@ class RestApiGenerator:
                     ).mappings().first()
                 return dict(row)  # type: ignore[arg-type]
 
-            app.add_api_route(prefix + "/{pk}", full_update, methods=["PUT"])
+            app.add_api_route(prefix + "/{pk}", full_update, methods=["PUT"],
+                              responses={200: {"model": response_model_cls}})
 
             # --- PATCH (partial update) ---
             async def partial_update(pk: int, request: Request) -> dict[str, Any]:
@@ -269,7 +297,8 @@ class RestApiGenerator:
                     ).mappings().first()
                 return dict(row)  # type: ignore[arg-type]
 
-            app.add_api_route(prefix + "/{pk}", partial_update, methods=["PATCH"])
+            app.add_api_route(prefix + "/{pk}", partial_update, methods=["PATCH"],
+                              responses={200: {"model": response_model_cls}})
 
             # --- DELETE ---
             async def delete_row(pk: int) -> Response:
@@ -281,7 +310,8 @@ class RestApiGenerator:
                     raise HTTPException(status_code=404, detail="Not found")
                 return Response(status_code=204)
 
-            app.add_api_route(prefix + "/{pk}", delete_row, methods=["DELETE"])
+            app.add_api_route(prefix + "/{pk}", delete_row, methods=["DELETE"],
+                              responses={204: {"description": "No Content"}})
 
 
 # ---------------------------------------------------------------------------
@@ -323,9 +353,10 @@ def _register_composite_pk_routes(
             raise HTTPException(status_code=404, detail="Not found")
         return dict(row)
 
-    app.add_api_route(pk_path, get_composite, methods=["GET"])
+    app.add_api_route(pk_path, get_composite, methods=["GET"],
+                      responses={200: {"model": response_model_cls}})
     # Also register {pk} alias using / separator for test compatibility
-    _register_pk_alias(app, prefix, pk_cols, sa_tbl, engine, update_model_cls)
+    _register_pk_alias(app, prefix, pk_cols, sa_tbl, engine, update_model_cls, response_model_cls)
 
 
 def _register_pk_alias(
@@ -335,6 +366,7 @@ def _register_pk_alias(
     sa_tbl: Table,
     engine: AsyncEngine,
     update_model_cls: type[BaseModel],
+    response_model_cls: type[BaseModel],
 ) -> None:
     """Register /api/table/{pk} where pk is col1_val/col2_val... encoded as path segments."""
     # Use a catch-all path param approach: register routes with each PK as separate param
@@ -357,7 +389,8 @@ def _register_pk_alias(
             row = (await conn.execute(select(sa_tbl).where(*cond))).mappings().first()
         return dict(row)  # type: ignore[arg-type]
 
-    app.add_api_route(pk_path_segments, put_composite, methods=["PUT"])
+    app.add_api_route(pk_path_segments, put_composite, methods=["PUT"],
+                      responses={200: {"model": response_model_cls}})
 
     # PATCH
     async def patch_composite(request: Request) -> dict[str, Any]:
@@ -376,7 +409,8 @@ def _register_pk_alias(
             raise HTTPException(status_code=404, detail="Not found")
         return dict(row)
 
-    app.add_api_route(pk_path_segments, patch_composite, methods=["PATCH"])
+    app.add_api_route(pk_path_segments, patch_composite, methods=["PATCH"],
+                      responses={200: {"model": response_model_cls}})
 
     # DELETE
     async def delete_composite(request: Request) -> Response:
@@ -388,4 +422,5 @@ def _register_pk_alias(
             raise HTTPException(status_code=404, detail="Not found")
         return Response(status_code=204)
 
-    app.add_api_route(pk_path_segments, delete_composite, methods=["DELETE"])
+    app.add_api_route(pk_path_segments, delete_composite, methods=["DELETE"],
+                      responses={204: {"description": "No Content"}})

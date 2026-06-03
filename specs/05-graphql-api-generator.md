@@ -37,8 +37,17 @@ input UsersUpdateInput {
 
 # Auto-generated queries
 type Query {
-  users(offset: Int = 0, limit: Int = 20): [Users!]!
+  users(page: Int = 1, pageSize: Int = 20): UsersPagination!
   usersById(id: Int!): Users
+}
+
+# Auto-generated pagination type
+type UsersPagination {
+  items: [Users!]!
+  page: Int!
+  pageSize: Int!
+  total: Int!
+  pages: Int!
 }
 
 # Auto-generated mutations

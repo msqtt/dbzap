@@ -18,6 +18,7 @@ async function loadRest() {
     const { resp } = await apiFetch('/openapi.json');
     if (!resp.ok) return;
     const spec = await resp.json();
+    _endpoints.push({ id: 'GET:/openapi.json', method: 'GET', path: '/openapi.json', type: 'rest', group: 'Schema', op: null, noQuery: true });
     for (const [path, methods] of Object.entries(spec.paths || {})) {
       for (const [method, op] of Object.entries(methods)) {
         const m = method.toUpperCase();

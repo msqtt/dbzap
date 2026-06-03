@@ -4,8 +4,9 @@ import { apiFetch } from './api.js';
 const INTROSPECTION_QUERY = `
 query IntrospectionQuery {
   __schema {
-    queryType { fields { name description args { name type { kind name ofType { kind name } } } } }
-    mutationType { fields { name description args { name type { kind name ofType { kind name } } } } }
+    queryType { fields { name description args { name type { kind name ofType { kind name ofType { kind name ofType { kind name } } } } } } }
+    mutationType { fields { name description args { name type { kind name ofType { kind name ofType { kind name ofType { kind name } } } } } } }
+    types { kind name fields { name type { kind name ofType { kind name ofType { kind name ofType { kind name } } } } } }
   }
 }`;
 

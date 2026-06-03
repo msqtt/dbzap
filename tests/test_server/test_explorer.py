@@ -7,11 +7,14 @@ from dbzap.server.app import create_app
 
 
 def _settings(**kwargs) -> Settings:  # type: ignore[no-untyped-def]
-    return Settings(
-        database_url="sqlite+aiosqlite:///:memory:",
-        jwt_secret_key="test-explorer-secret",
-        **kwargs,
-    )
+    defaults = {
+        "database_url": "sqlite+aiosqlite:///:memory:",
+        "jwt_secret_key": "test-explorer-secret",
+        "explorer_username": None,
+        "explorer_password": None,
+    }
+    defaults.update(kwargs)
+    return Settings(**defaults)  # type: ignore[arg-type]
 
 
 @pytest.fixture
@@ -99,3 +102,52 @@ async def test_no_external_cdn_in_html(client: AsyncClient) -> None:
     assert "unpkg.com" not in html
     assert "jsdelivr" not in html
     assert "googleapis.com" not in html
+
+
+# ---------------------------------------------------------------------------
+# /explorer/config
+# ---------------------------------------------------------------------------
+
+
+async def test_config_defaults_null(client: AsyncClient) -> None:
+    resp = await client.get("/explorer/config")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data == {"username": None, "password": None}
+
+
+async def test_config_returns_configured_values() -> None:
+    app = await create_app(
+        settings=_settings(
+            enable_explorer=True,
+            explorer_username="admin",
+            explorer_password="secret",
+        )
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        resp = await c.get("/explorer/config")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data == {"username": "admin", "password": "secret"}
+
+
+async def test_config_disabled_returns_404(client_disabled: AsyncClient) -> None:
+    resp = await client_disabled.get("/explorer/config")
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Theme toggle in HTML
+# ---------------------------------------------------------------------------
+
+
+async def test_theme_toggle_button_present(client: AsyncClient) -> None:
+    resp = await client.get("/explorer")
+    html = resp.text
+    assert 'id="theme-btn"' in html
+
+
+async def test_theme_inline_script_present(client: AsyncClient) -> None:
+    resp = await client.get("/explorer")
+    html = resp.text
+    assert "dbzap-theme" in html

@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     jwt_secret_key: str
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60
+    auth_mode: Literal["jwt", "basic", "both"] = "jwt"
 
     # Server
     host: str = "0.0.0.0"
@@ -23,6 +24,8 @@ class Settings(BaseSettings):
 
     # Explorer UI
     enable_explorer: bool = True
+    explorer_username: str | None = None
+    explorer_password: str | None = None
 
     # Database pool
     db_pool_size: int = 10

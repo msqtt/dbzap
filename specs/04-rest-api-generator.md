@@ -20,9 +20,20 @@ PATCH  /api/users/{id}      -> Partial update, return 200 or 404
 DELETE /api/users/{id}      -> Delete row, return 204 or 404
 ```
 
+Response body for list endpoint:
+```json
+{
+  "items": [...],
+  "page": 1,
+  "page_size": 20,
+  "total": 100,
+  "pages": 5
+}
+```
+
 Query parameters for list:
-- `offset: int = 0`
-- `limit: int = 20` (max 100)
+- `page: int = 1` (1-indexed)
+- `page_size: int = 20` (max 100)
 
 Request/Response models are auto-generated:
 ```python
@@ -65,13 +76,13 @@ No new tables. Routes operate on the introspected database tables directly using
 - Column with NOT NULL and no default: required in Create model.
 - Column with UNIQUE constraint: validate uniqueness on create/update, return 409 on conflict.
 - Very large table list: route registration happens at startup, not per-request.
-- Invalid `limit`/`offset` values: clamp `limit` to [1, 100], `offset` to >= 0.
+- Invalid `page`/`page_size` values: clamp `page_size` to [1, 100], `page` to >= 1.
 
 ## Acceptance Criteria
 - [ ] All 6 CRUD routes are registered per table (when PK exists).
 - [ ] Pydantic request models correctly reflect nullable/required fields.
 - [ ] Pydantic response models include all columns.
-- [ ] List endpoint supports `offset`/`limit` pagination.
+- [ ] List endpoint supports `page`/`page_size` pagination.
 - [ ] GET by PK returns 404 when row not found.
 - [ ] DELETE returns 204 on success, 404 when row not found.
 - [ ] PATCH updates only provided fields.
