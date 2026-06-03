@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>dbzap Explorer</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>" />
   <link rel="stylesheet" href="/explorer/static/css/style.css" />
   <link rel="stylesheet" href="/explorer/static/css/dashboard.css" />
   <script>
@@ -78,6 +79,10 @@
             </div>
             <div id="query-params-section" class="param-section hidden">
               <h3>Query Parameters</h3>
+              <div id="search-row" class="param-row">
+                <label for="qp-q">q (search)</label>
+                <input id="qp-q" type="text" placeholder="Search text..." />
+              </div>
               <div class="pagination-toggle">
                 <label>Mode:</label>
                 <button id="pg-mode-offset" class="pg-mode-btn active" type="button">Offset</button>
@@ -90,10 +95,6 @@
               <h3>Filters <span class="hint-label">(LHS Brackets)</span></h3>
               <div id="filter-rows"></div>
               <button id="add-filter-btn" class="btn btn-ghost btn-sm" type="button">+ Add filter</button>
-              <div id="filter-options" class="filter-options hidden">
-                <label for="filter-or">_or (OR fields):</label>
-                <input id="filter-or" type="text" placeholder="field1,field2" />
-              </div>
             </div>
             <div id="headers-section" class="param-section">
               <h3>Headers</h3>

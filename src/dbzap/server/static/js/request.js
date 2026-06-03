@@ -65,6 +65,8 @@ export function loadEndpoint(endpoint) {
   const cursorContainer = document.getElementById('cursor-params');
   queryContainer.innerHTML = '';
   cursorContainer.innerHTML = '';
+  const qInput = document.getElementById('qp-q');
+  if (qInput) qInput.value = '';
 
   if (isListGet) {
     querySection.classList.remove('hidden');
@@ -173,8 +175,6 @@ function renderFilterSection() {
     return;
   }
   section.classList.remove('hidden');
-  document.getElementById('filter-or').value = '';
-  document.getElementById('filter-options').classList.add('hidden');
 }
 
 function addFilterRow(field = '', op = 'eq', value = '') {
@@ -398,6 +398,10 @@ function buildQueryString() {
 
   if (!isListGet) return '';
 
+  // Search query
+  const q = document.getElementById('qp-q')?.value?.trim();
+  if (q) parts.push(`q=${encodeURIComponent(q)}`);
+
   if (_pgMode === 'offset') {
     const page = document.getElementById('qp-page')?.value || '1';
     const pageSize = document.getElementById('qp-page-size')?.value || '20';
@@ -421,10 +425,6 @@ function buildQueryString() {
       parts.push(`${encodeURIComponent(field)}[${op}]=${encodeURIComponent(value)}`);
     }
   }
-
-  // _or
-  const orVal = document.getElementById('filter-or')?.value?.trim();
-  if (orVal) parts.push(`_or=${encodeURIComponent(orVal)}`);
 
   return parts.length > 0 ? `?${parts.join('&')}` : '';
 }

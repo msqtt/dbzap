@@ -75,7 +75,7 @@ Config source: `EXPLORER_USERNAME` and `EXPLORER_PASSWORD` environment variables
 - **Filter section** (LHS Brackets, for list GET endpoints):
   - Dynamic filter rows: each row has field input (with datalist autocomplete from table columns), operator dropdown (`eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `like`, `in`, `is`), value input, and remove button
   - "+ Add filter" button appends new rows
-  - `_or` input for specifying comma-separated field names to combine with OR
+  - `q` (search) input for global text search across all string columns
   - Filters are serialized as `field[op]=value` query params when sending
 - Request body: JSON editor (for POST/PUT/PATCH/GraphQL)
   - **Auto-filled from OpenAPI spec**: for POST/PUT/PATCH endpoints, the body editor is pre-populated with a JSON template generated from the request body schema (`openapi_extra` → `components.schemas`)
@@ -212,7 +212,7 @@ src/dbzap/server/static/
 - [ ] Filter section appears on list GET endpoints with dynamic field/operator/value rows; "+ Add filter" appends rows; remove button deletes rows.
 - [ ] Filter field inputs include autocomplete datalist populated from table column names (extracted from OpenAPI response schema).
 - [ ] Filters are serialized as LHS Bracket query params (`field[op]=value`) when sending requests.
-- [ ] `_or` field is visible when at least one filter row exists.
+- [ ] `q` (search) input is visible on list GET endpoints and included in the query string when sending.
 - [ ] Request body editor is auto-filled with a JSON template generated from the OpenAPI request body schema for POST/PUT/PATCH endpoints.
 - [ ] OpenAPI spec includes `requestBody` with `$ref` to Create/Update models for POST/PUT/PATCH routes.
 - [ ] OpenAPI spec includes Create/Update Pydantic models in `components.schemas`.

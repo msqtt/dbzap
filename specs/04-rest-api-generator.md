@@ -35,7 +35,7 @@ Activated when `page` or `page_size` is present (or no pagination params at all)
 
 #### Cursor-based
 
-Activated when `starting_after` or `ending_before` is present. Requires the table to have a single-column integer PK.
+Activated when `limit`, `starting_after`, or `ending_before` is present AND neither `page` nor `page_size` is present. Requires the table to have a single-column integer PK; otherwise falls back to offset mode.
 
 | Parameter        | Type   | Default | Description                                        |
 | ---------------- | ------ | ------- | -------------------------------------------------- |
@@ -47,7 +47,7 @@ Cursor values are Base64-encoded PK values. The response includes `next_cursor` 
 
 ### Filtering (LHS Brackets)
 
-Filter conditions use query parameters with the `field[op]=value` syntax. Multiple filters are ANDed by default.
+Filter conditions use query parameters with the `field[op]=value` syntax. Multiple filters are always ANDed.
 
 #### Operators
 
@@ -65,30 +65,33 @@ Filter conditions use query parameters with the `field[op]=value` syntax. Multip
 
 Examples:
 ```
-GET /api/users?name[like]=Alice           # name LIKE '%Alice%'
-GET /api/users?score[gte]=80&score[lte]=100  # 80 <= score <= 100
-GET /api/users?status[in]=active,pending  # status IN ('active','pending')
+GET /api/users?name[like]=Alice               # name LIKE '%Alice%'
+GET /api/users?score[gte]=80&score[lte]=100   # 80 <= score <= 100
+GET /api/users?status[in]=active,pending      # status IN ('active','pending')
 ```
 
 Plain field names without brackets are treated as `eq`:
 ```
-GET /api/users?name=Alice                 # name = 'Alice'
+GET /api/users?name=Alice                     # name = 'Alice'
 ```
 
-#### OR combinations
+### Search (`q` parameter)
 
-Use the special `_or` parameter (comma-separated field references) to OR a group of conditions. All other top-level filters remain ANDed:
+The `q` parameter performs a global text search across all string/text columns in the table. It uses `LIKE '%q%'` on each string column, combined with OR. The result is then ANDed with any LHS Bracket filters.
 
 ```
-GET /api/users?name[like]=Alice&email[like]=bob&_or=name,email
+GET /api/users?q=alice                        # search all text columns for 'alice'
+GET /api/products?q=apple&category[eq]=fruit  # search + field filter
 ```
 
-Translates to: `WHERE (name LIKE '%Alice%' OR email LIKE '%bob%')`
+Implementation: the generator identifies all columns with string-type SQL types (`VARCHAR`, `TEXT`, `CHAR`, etc.) at introspection time. The `q` value is matched against each string column with `LIKE '%value%'`, ORed together:
 
-Nested AND/OR via JSON `_filter` parameter:
+```sql
+WHERE (name LIKE '%alice%' OR email LIKE '%alice%' OR bio LIKE '%alice%')
+  AND score >= 80   -- from LHS Bracket filter
 ```
-GET /api/users?_filter={"or":[{"and":[{"field":"name","op":"like","value":"A"},{"field":"score","op":"gt","value":90}]},{"field":"email","op":"like","value":"admin"}]}
-```
+
+If the table has no string columns, `q` is silently ignored.
 
 ### Response format
 
@@ -120,14 +123,18 @@ GET /api/users?_filter={"or":[{"and":[{"field":"name","op":"like","value":"A"},{
     { "id": 21, "name": "Carol" },
     { "id": 22, "name": "Dave" }
   ],
-  "pagination": {
-    "mode": "cursor",
-    "has_next": true,
-    "has_prev": true,
-    "next_cursor": "MjI="
+  "paging": {
+    "cursors": {
+      "after": "MjI="
+    },
+    "next": "/api/users?limit=20&starting_after=MjI="
   }
 }
 ```
+
+- `paging.cursors.after`: cursor pointing to the last item in the current page (used as `starting_after` for the next page). Omitted when there is no next page.
+- `paging.cursors.before`: cursor pointing to the first item in the current page (used as `ending_before` for the previous page). Omitted when there is no previous page.
+- `paging.next`: absolute URL for the next page. Omitted when there is no next page.
 
 Request/Response models are auto-generated:
 ```python
@@ -176,8 +183,9 @@ No new tables. Routes operate on the introspected database tables directly using
 - Cursor pagination on table with composite PK or no PK: fall back to offset mode, ignore cursor params.
 - Filter references non-existent column: silently ignore the filter (do not crash).
 - Filter references non-existent operator: return 400 with descriptive error.
-- `_or` references fields not present in query params: silently ignore those references.
-- `_filter` JSON is malformed: return 400 with descriptive error.
+- `q` parameter on table with no string columns: silently ignored, no filtering applied.
+- `q` parameter combined with LHS Bracket filters: `q` ORs across string columns, result ANDed with bracket filters.
+- `q` value contains SQL special characters (`%`, `_`): escape them for safe LIKE matching.
 - `like` operator: automatically wrap value with `%` on both sides for substring matching.
 - `in` operator: split value by comma, trim whitespace.
 - `is` operator: only accepts `null` or `not_null` as values.
@@ -187,16 +195,19 @@ No new tables. Routes operate on the introspected database tables directly using
 - [ ] Pydantic request models correctly reflect nullable/required fields.
 - [ ] Pydantic response models include all columns.
 - [ ] List endpoint supports offset pagination (`page`/`page_size`).
-- [ ] List endpoint supports cursor pagination (`starting_after`/`ending_before`/`limit`).
-- [ ] Cursor values are Base64-encoded; response includes `next_cursor`.
+- [ ] List endpoint supports cursor pagination (`limit`/`starting_after`/`ending_before`).
+- [ ] Cursor mode activates when `limit` is sent without offset params (`page`/`page_size`).
+- [ ] Cursor values are Base64-encoded; response uses `paging.cursors.after` / `paging.cursors.before`.
+- [ ] Cursor response includes `paging.next` URL for HATEOAS navigation.
 - [ ] List endpoint supports LHS Brackets filtering: `field[op]=value`.
 - [ ] All 9 filter operators work: eq, ne, gt, gte, lt, lte, like, in, is.
-- [ ] Multiple filters are ANDed by default.
-- [ ] `_or` parameter groups specified fields into OR conditions.
-- [ ] `_filter` JSON parameter supports nested AND/OR expressions.
+- [ ] Multiple filters are always ANDed.
+- [ ] `q` parameter searches all string/text columns with `LIKE '%q%'`, ORed across columns.
+- [ ] `q` combined with LHS Bracket filters: search result ANDed with field filters.
+- [ ] `q` is silently ignored on tables with no string columns.
 - [ ] Response format uses `data` array and `pagination` metadata object.
 - [ ] Offset mode response includes `mode`, `total_records`, `current_page`, `per_page`, `total_pages`, `has_next`, `has_prev`.
-- [ ] Cursor mode response includes `mode`, `has_next`, `has_prev`, `next_cursor`.
+- [ ] Cursor mode response includes `data` array and `paging` object with `cursors` and `next`.
 - [ ] GET by PK returns 404 when row not found.
 - [ ] DELETE returns 204 on success, 404 when row not found.
 - [ ] PATCH updates only provided fields.

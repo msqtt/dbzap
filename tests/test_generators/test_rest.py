@@ -483,12 +483,6 @@ class TestFiltering:
         names = {r["name"] for r in data}
         assert names == {"Bob", "Carol"}
 
-    async def test_or_filter(self, client: AsyncClient) -> None:
-        await self._seed(client)
-        resp = await client.get("/api/users?name[eq]=Alice&name[eq]=Bob&_or=name")
-        data = resp.json()["data"]
-        assert len(data) == 2
-
     async def test_filter_nonexistent_field_ignored(self, client: AsyncClient) -> None:
         await self._seed(client)
         resp = await client.get("/api/users?nonexistent=value")
@@ -508,6 +502,70 @@ class TestFiltering:
 
 
 # ---------------------------------------------------------------------------
+# Search  GET /api/users?q=...
+# ---------------------------------------------------------------------------
+
+
+class TestSearch:
+    async def _seed(self, client: AsyncClient) -> None:
+        await client.post("/api/users", json={"name": "Alice", "email": "alice@x.com", "score": 95.0})
+        await client.post("/api/users", json={"name": "Bob", "email": "bob@x.com", "score": 80.0})
+        await client.post("/api/users", json={"name": "Carol", "email": "carol@example.com", "score": 65.0})
+
+    async def test_q_matches_name(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        resp = await client.get("/api/users?q=Alice")
+        data = resp.json()["data"]
+        assert len(data) == 1
+        assert data[0]["name"] == "Alice"
+
+    async def test_q_matches_email(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        resp = await client.get("/api/users?q=example")
+        data = resp.json()["data"]
+        assert len(data) == 1
+        assert data[0]["name"] == "Carol"
+
+    async def test_q_matches_any_string_column(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        resp = await client.get("/api/users?q=ob")
+        data = resp.json()["data"]
+        assert len(data) == 1
+        assert data[0]["name"] == "Bob"
+
+    async def test_q_no_match(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        resp = await client.get("/api/users?q=zzz")
+        data = resp.json()["data"]
+        assert len(data) == 0
+
+    async def test_q_combined_with_filter(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        resp = await client.get("/api/users?q=alice&score[gte]=90")
+        data = resp.json()["data"]
+        assert len(data) == 1
+        assert data[0]["name"] == "Alice"
+
+    async def test_q_combined_with_filter_no_match(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        resp = await client.get("/api/users?q=alice&score[lte]=50")
+        data = resp.json()["data"]
+        assert len(data) == 0
+
+    async def test_q_case_insensitive_like(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        resp = await client.get("/api/users?q=ALICE")
+        data = resp.json()["data"]
+        assert len(data) >= 1
+
+    async def test_q_empty_value(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        resp = await client.get("/api/users?q=")
+        assert resp.status_code == 200
+        assert len(resp.json()["data"]) == 3
+
+
+# ---------------------------------------------------------------------------
 # Cursor pagination  GET /api/users?starting_after=...
 # ---------------------------------------------------------------------------
 
@@ -522,40 +580,52 @@ class TestCursorPagination:
         import base64
         return base64.urlsafe_b64encode(str(pk).encode()).decode()
 
+    async def test_cursor_limit_only(self, client: AsyncClient) -> None:
+        """Sending just limit (no offset params) activates cursor mode."""
+        await self._seed(client)
+        resp = await client.get("/api/users?limit=3")
+        body = resp.json()
+        assert "paging" in body
+        assert len(body["data"]) == 3
+        assert body["paging"]["cursors"]["after"] is not None
+
     async def test_cursor_first_page(self, client: AsyncClient) -> None:
         await self._seed(client)
         resp = await client.get(f"/api/users?limit=3&starting_after={self._encode(0)}")
         body = resp.json()
-        assert body["pagination"]["mode"] == "cursor"
+        assert "paging" in body
         assert len(body["data"]) == 3
 
     async def test_cursor_has_next(self, client: AsyncClient) -> None:
         await self._seed(client)
         resp = await client.get(f"/api/users?limit=3&starting_after={self._encode(0)}")
-        pg = resp.json()["pagination"]
-        assert pg["has_next"] is True
-        assert pg["next_cursor"] is not None
+        paging = resp.json()["paging"]
+        assert paging["cursors"]["after"] is not None
+        assert "next" in paging
 
     async def test_cursor_chain(self, client: AsyncClient) -> None:
         await self._seed(client)
         all_ids: list[int] = []
-        cursor = self._encode(0)
+        # First page: just limit
+        resp = await client.get("/api/users?limit=3")
+        body = resp.json()
+        all_ids.extend(r["id"] for r in body["data"])
+        # Subsequent pages: follow paging.next URL or use cursors.after
         for _ in range(4):
-            resp = await client.get(f"/api/users?limit=3&starting_after={cursor}")
+            after = body["paging"]["cursors"].get("after")
+            if not after:
+                break
+            resp = await client.get(f"/api/users?limit=3&starting_after={after}")
             body = resp.json()
             all_ids.extend(r["id"] for r in body["data"])
-            if body["pagination"]["next_cursor"]:
-                cursor = body["pagination"]["next_cursor"]
-            else:
-                break
         assert len(all_ids) == 10
         assert len(set(all_ids)) == 10
 
     async def test_cursor_no_duplicates(self, client: AsyncClient) -> None:
         await self._seed(client)
         resp1 = await client.get(f"/api/users?limit=5&starting_after={self._encode(0)}")
-        cursor = resp1.json()["pagination"]["next_cursor"]
-        resp2 = await client.get(f"/api/users?limit=5&starting_after={cursor}")
+        after = resp1.json()["paging"]["cursors"]["after"]
+        resp2 = await client.get(f"/api/users?limit=5&starting_after={after}")
         ids1 = {r["id"] for r in resp1.json()["data"]}
         ids2 = {r["id"] for r in resp2.json()["data"]}
         assert ids1.isdisjoint(ids2)
@@ -567,8 +637,8 @@ class TestCursorPagination:
         resp = await client.get(f"/api/users?limit=5&starting_after={self._encode(last_id)}")
         body = resp.json()
         assert len(body["data"]) == 0
-        assert body["pagination"]["has_next"] is False
-        assert body["pagination"]["next_cursor"] is None
+        assert "after" not in body["paging"]["cursors"]
+        assert "next" not in body["paging"]
 
     async def test_cursor_invalid_returns_400(self, client: AsyncClient) -> None:
         resp = await client.get("/api/users?starting_after=not-valid-base64!!!")
@@ -587,7 +657,24 @@ class TestCursorPagination:
         last_id = all_resp.json()["data"][-1]["id"]
         resp = await client.get(f"/api/users?limit=3&ending_before={self._encode(last_id)}")
         body = resp.json()
-        assert body["pagination"]["mode"] == "cursor"
+        assert "paging" in body
         assert len(body["data"]) == 3
         for row in body["data"]:
             assert row["id"] < last_id
+
+    async def test_cursor_paging_next_url(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        resp = await client.get("/api/users?limit=3")
+        paging = resp.json()["paging"]
+        assert "next" in paging
+        assert "starting_after=" in paging["next"]
+        assert "limit=3" in paging["next"]
+
+    async def test_offset_params_override_cursor(self, client: AsyncClient) -> None:
+        """page/page_size takes precedence over limit."""
+        await self._seed(client)
+        resp = await client.get("/api/users?limit=3&page=1&page_size=5")
+        body = resp.json()
+        assert "pagination" in body
+        assert body["pagination"]["mode"] == "offset"
+        assert len(body["data"]) == 5
