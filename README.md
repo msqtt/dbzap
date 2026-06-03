@@ -19,6 +19,8 @@ dbzap reads your database schema and instantly generates REST + GraphQL APIs —
 
 ## Quick Start
 
+### pip / poetry
+
 ```bash
 # 1. Install
 pip install dbzap        # or: poetry add dbzap
@@ -29,6 +31,15 @@ export JWT_SECRET_KEY="pick-a-strong-secret"
 
 # 3. Run
 dbzap serve
+```
+
+### Docker
+
+```bash
+docker run -p 8000:8000 \
+  -e DATABASE_URL="postgresql+asyncpg://user:pass@host/db" \
+  -e JWT_SECRET_KEY="pick-a-strong-secret" \
+  ghcr.io/msqtt/dbzap:latest
 ```
 
 That's it. Every table in your database now has full CRUD endpoints.
@@ -42,8 +53,8 @@ That's it. Every table in your database now has full CRUD endpoints.
 
 | Feature | Details |
 |---------|---------|
-| REST CRUD | `POST / GET / PUT / PATCH / DELETE` per table, auto-generated Pydantic models |
-| GraphQL | Query + Mutation per table, auto-generated types |
+| REST CRUD | `POST / GET / PUT / PATCH / DELETE` per table, auto-generated Pydantic models, offset + cursor pagination, LHS Brackets filtering |
+| GraphQL | Query + Mutation per table, Relay Cursor Connections, Filter Input types with operators, global search |
 | Auth | JWT login/register, all endpoints protected by default |
 | API Explorer | Built-in UI to browse, test, and debug your APIs |
 | Dashboard | Real-time metrics: request rate, latency, DB pool health |
@@ -54,15 +65,31 @@ That's it. Every table in your database now has full CRUD endpoints.
 
 All settings via environment variables (or `.env` file):
 
+### Required
+
+| Variable | Description |
+|----------|-------------|
+| `DATABASE_URL` | Database connection URL. Examples:<br>`postgresql+asyncpg://user:pass@host/db`<br>`mysql+aiomysql://user:pass@host/db`<br>`sqlite+aiosqlite:///path/to/db.sqlite` |
+| `JWT_SECRET_KEY` | HMAC secret for JWT token signing. Must be non-empty. |
+
+### Optional
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DATABASE_URL` | *required* | `postgresql+asyncpg://...` |
-| `JWT_SECRET_KEY` | *required* | HMAC secret for JWT signing |
-| `API_MODE` | `both` | `rest`, `graphql`, or `both` |
+| `JWT_ALGORITHM` | `HS256` | JWT signing algorithm |
+| `JWT_EXPIRE_MINUTES` | `60` | JWT token lifetime in minutes |
+| `AUTH_MODE` | `jwt` | Authentication mode: `jwt`, `basic`, or `both` |
+| `API_MODE` | `both` | Enabled APIs: `rest`, `graphql`, or `both` |
 | `HOST` | `0.0.0.0` | Server bind address |
 | `PORT` | `8000` | Server port |
-| `DB_POOL_SIZE` | `10` | Connection pool size |
-| `ENABLE_EXPLORER` | `true` | Enable/disable the web UI |
+| `ENABLE_EXPLORER` | `true` | Enable the web-based API Explorer UI |
+| `EXPLORER_USERNAME` | — | Pre-fill explorer login username (optional) |
+| `EXPLORER_PASSWORD` | — | Pre-fill explorer login password (optional) |
+| `DB_POOL_SIZE` | `10` | SQLAlchemy connection pool size |
+| `DB_MAX_OVERFLOW` | `20` | Max extra connections beyond pool size |
+| `DB_POOL_TIMEOUT` | `30` | Seconds to wait for a connection from the pool |
+| `DB_POOL_RECYCLE` | `1800` | Max connection lifetime in seconds |
+| `DB_STATEMENT_TIMEOUT` | `5s` | Database statement timeout (e.g. `5s`, `30s`) |
 
 ## Development
 
@@ -85,4 +112,4 @@ No ORM models to write. No migrations to run. No code to generate.
 
 ## License
 
-MIT
+[MIT](LICENSE)
