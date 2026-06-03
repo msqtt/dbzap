@@ -1,7 +1,7 @@
 [project]
 name = "dbzap"
 version = "0.1.0"
-description = "Instant API generator from database DDL - REST and GraphQL"
+description = "Zero-config REST & GraphQL API generator from database DDL with auth, filtering, and pagination"
 authors = [
     {name = "msqtt"}
 ]
