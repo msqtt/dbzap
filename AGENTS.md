@@ -8,21 +8,42 @@
 
 All agents MUST follow these rules. Violations are blockers.
 
-### 1. Spec-Driven Development (SDD)
+### 1. Strict Development Order: SDD → TDD → Implementation
 
-- Before writing ANY code, read or create a Spec file under `specs/`.
+Every feature, enhancement, bug fix, or behavioral change MUST follow this exact order. **No exceptions.**
+
+```
+Phase 1: SPEC    — Write or update specs/<feature>.md first
+Phase 2: TEST    — Write or update tests based on the spec
+Phase 3: SOURCE  — Implement source code to pass the tests
+```
+
+**Phase 1 — Spec (gate: spec file committed/updated)**
+- Before writing ANY code or test, read or create a Spec file under `specs/`.
 - Spec files use Markdown format: `specs/<feature-name>.md`.
 - A Spec must contain: goal, scope, API contract, data model, edge cases, and acceptance criteria.
-- Never skip Spec. If no Spec exists, create one and get confirmation before coding.
+- If no Spec exists, create one. If the change modifies existing behavior, update the existing Spec.
+- Never skip Spec. No Spec = no work proceeds.
 
-### 2. Test-Driven Development (TDD)
-
-- For core modules, write test cases BEFORE implementation logic.
-- Test files live alongside source: `tests/test_<module>.py`.
+**Phase 2 — Tests (gate: failing tests exist that cover the spec)**
+- Write test cases that cover every acceptance criterion in the Spec.
+- Tests MUST fail initially (red) before implementation begins.
+- Test files live in `tests/test_<module>.py`.
 - Minimum coverage target: core modules 90%, utilities 70%.
-- Run `pytest` and ensure all tests pass before considering a task done.
 
-### 3. Security Baseline
+**Phase 3 — Implementation (gate: all tests green)**
+- Implement source code only after failing tests exist.
+- Run `pytest` — all tests must pass (green) before considering the task done.
+- Run `mypy` — no type errors.
+- Do not add functionality beyond what the Spec defines.
+
+**Anti-patterns (NEVER do these):**
+- Writing source code first and adding tests/specs after the fact.
+- Modifying source code without first updating the Spec if behavior changes.
+- Skipping Spec for "small changes" — even bug fixes need a one-line Spec update.
+- Writing tests that pass immediately without first verifying they would fail against unimplemented code.
+
+### 2. Security Baseline
 
 - NEVER hardcode API keys, passwords, or secrets in any file.
 - All secrets come from environment variables or `.env` (which is gitignored).
@@ -78,14 +99,44 @@ dbzap/
 
 ## Development Workflow
 
+Every task follows this exact sequence. Do not skip or reorder steps.
+
 ```
-1. Read/create Spec in specs/
-2. Write tests in tests/
-3. Implement in src/
-4. Run pytest - all green
-5. Run mypy - no errors
-6. Done
+┌─────────────────────────────────────────────────────────┐
+│  Phase 1: SPEC                                          │
+│  1. Read relevant existing specs in specs/              │
+│  2. Create new spec OR update existing spec             │
+│  3. Define: goal, scope, API contract, edge cases,      │
+│     acceptance criteria                                 │
+│  GATE: Spec file is complete and saved                  │
+├─────────────────────────────────────────────────────────┤
+│  Phase 2: TEST                                          │
+│  4. Write tests covering every acceptance criterion     │
+│  5. Run pytest — confirm tests FAIL (red)               │
+│  GATE: Failing tests exist, no source changes yet       │
+├─────────────────────────────────────────────────────────┤
+│  Phase 3: IMPLEMENT                                     │
+│  6. Write source code to make tests pass                │
+│  7. Run pytest — all tests PASS (green)                 │
+│  8. Run mypy — no type errors                           │
+│  GATE: All green, spec acceptance criteria checked off  │
+├─────────────────────────────────────────────────────────┤
+│  Phase 4: VERIFY                                        │
+│  9. Re-read spec — confirm all criteria are met         │
+│  10. Check no unintended side effects                   │
+│  DONE                                                   │
+└─────────────────────────────────────────────────────────┘
 ```
+
+### Quick reference
+
+| Change type         | Spec action                        | Test action                     |
+| ------------------- | ---------------------------------- | ------------------------------- |
+| New feature         | Create `specs/<feature>.md`        | Add new test class/functions    |
+| Enhancement         | Update existing spec sections      | Add tests for new behavior      |
+| Bug fix             | Update spec edge cases / contract  | Add regression test first       |
+| Refactor            | Update spec if API changes         | Ensure existing tests still pass|
+| Frontend-only UI    | Update spec UI contract section    | Update explorer test fixtures   |
 
 ## Code Conventions
 
@@ -126,27 +177,30 @@ Tables, columns, relationships.
 
 ### Feature Agent
 
-- Start by reading relevant Specs in `specs/`.
-- If no Spec matches, create one using the template above.
-- Write failing tests first, then implement until tests pass.
-- Do not modify files outside the feature scope without explicit permission.
+1. **SPEC**: Read relevant Specs in `specs/`. If none matches, create one using the template below. Do not proceed until the Spec is complete.
+2. **TEST**: Write failing tests that cover every acceptance criterion. Run `pytest` and confirm they fail (red).
+3. **IMPLEMENT**: Write source code until all tests pass (green). Do not modify files outside the feature scope.
+4. **VERIFY**: Re-read the Spec. Confirm every acceptance criterion is satisfied by a passing test.
 
 ### Refactor Agent
 
-- Read existing tests before changing any code.
-- Ensure all tests pass before AND after refactoring.
-- Do not change public APIs unless the Spec explicitly requires it.
+1. **SPEC**: Update the Spec if any public API or behavior changes.
+2. **TEST**: Ensure existing tests pass. Add new tests if refactoring changes observable behavior.
+3. **IMPLEMENT**: Refactor source code. Run `pytest` — all tests must pass before AND after.
+4. **VERIFY**: Confirm no public APIs changed unless the Spec required it.
 
 ### Bug Fix Agent
 
-- Reproduce the bug with a failing test first.
-- Fix the code to make the test pass.
-- Verify no regressions in existing tests.
+1. **SPEC**: Update the Spec's edge cases or API contract to document the correct behavior.
+2. **TEST**: Write a regression test that reproduces the bug. Confirm it fails (red).
+3. **IMPLEMENT**: Fix the code to make the regression test pass.
+4. **VERIFY**: Run full test suite — no regressions in existing tests.
 
 ### Review Agent
 
-- Check: SDD compliance (Spec exists), TDD compliance (tests exist), security baseline.
-- Flag any hardcoded secrets immediately as critical.
+- Check SDD compliance: Does the Spec exist? Is it up to date? Does it match the implementation?
+- Check TDD compliance: Do tests exist for every acceptance criterion? Were they written before source?
+- Check security baseline: Flag any hardcoded secrets as critical.
 - Verify type hints on all public interfaces.
 
 ## Database Introspection Rules

@@ -78,7 +78,22 @@
             </div>
             <div id="query-params-section" class="param-section hidden">
               <h3>Query Parameters</h3>
+              <div class="pagination-toggle">
+                <label>Mode:</label>
+                <button id="pg-mode-offset" class="pg-mode-btn active" type="button">Offset</button>
+                <button id="pg-mode-cursor" class="pg-mode-btn" type="button">Cursor</button>
+              </div>
               <div id="query-params"></div>
+              <div id="cursor-params" class="hidden"></div>
+            </div>
+            <div id="filter-section" class="param-section hidden">
+              <h3>Filters <span class="hint-label">(LHS Brackets)</span></h3>
+              <div id="filter-rows"></div>
+              <button id="add-filter-btn" class="btn btn-ghost btn-sm" type="button">+ Add filter</button>
+              <div id="filter-options" class="filter-options hidden">
+                <label for="filter-or">_or (OR fields):</label>
+                <input id="filter-or" type="text" placeholder="field1,field2" />
+              </div>
             </div>
             <div id="headers-section" class="param-section">
               <h3>Headers</h3>

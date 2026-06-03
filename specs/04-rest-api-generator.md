@@ -13,27 +13,121 @@ For each table `users` with columns `id (PK, int)`, `name (str, NOT NULL)`, `ema
 
 ```
 POST   /api/users          -> Create a new row, return 201
-GET    /api/users           -> List rows (paginated), return 200
+GET    /api/users           -> List rows (paginated, filterable), return 200
 GET    /api/users/{id}      -> Get single row by PK, return 200 or 404
 PUT    /api/users/{id}      -> Full update, return 200 or 404
 PATCH  /api/users/{id}      -> Partial update, return 200 or 404
 DELETE /api/users/{id}      -> Delete row, return 204 or 404
 ```
 
-Response body for list endpoint:
+### Pagination
+
+Two modes are supported. The mode is determined by which query parameters the client sends:
+
+#### Offset-based (default)
+
+Activated when `page` or `page_size` is present (or no pagination params at all).
+
+| Parameter   | Type  | Default | Description                      |
+| ----------- | ----- | ------- | -------------------------------- |
+| `page`      | int   | 1       | Page number (1-indexed, >= 1)    |
+| `page_size` | int   | 20      | Items per page (clamped 1–100)   |
+
+#### Cursor-based
+
+Activated when `starting_after` or `ending_before` is present. Requires the table to have a single-column integer PK.
+
+| Parameter        | Type   | Default | Description                                        |
+| ---------------- | ------ | ------- | -------------------------------------------------- |
+| `limit`          | int    | 20      | Items per page (clamped 1–100)                     |
+| `starting_after` | string | —       | Base64 cursor — fetch items after this PK value    |
+| `ending_before`  | string | —       | Base64 cursor — fetch items before this PK value   |
+
+Cursor values are Base64-encoded PK values. The response includes `next_cursor` for chaining.
+
+### Filtering (LHS Brackets)
+
+Filter conditions use query parameters with the `field[op]=value` syntax. Multiple filters are ANDed by default.
+
+#### Operators
+
+| Operator | Meaning               | SQL equivalent          |
+| -------- | --------------------- | ----------------------- |
+| `eq`     | Equal                 | `= value`               |
+| `ne`     | Not equal             | `!= value`              |
+| `gt`     | Greater than          | `> value`               |
+| `gte`    | Greater or equal      | `>= value`              |
+| `lt`     | Less than             | `< value`               |
+| `lte`    | Less or equal         | `<= value`              |
+| `like`   | Pattern match         | `LIKE %value%`          |
+| `in`     | In set                | `IN (v1, v2, ...)`      |
+| `is`     | Null check            | `IS NULL` / `IS NOT NULL` |
+
+Examples:
+```
+GET /api/users?name[like]=Alice           # name LIKE '%Alice%'
+GET /api/users?score[gte]=80&score[lte]=100  # 80 <= score <= 100
+GET /api/users?status[in]=active,pending  # status IN ('active','pending')
+```
+
+Plain field names without brackets are treated as `eq`:
+```
+GET /api/users?name=Alice                 # name = 'Alice'
+```
+
+#### OR combinations
+
+Use the special `_or` parameter (comma-separated field references) to OR a group of conditions. All other top-level filters remain ANDed:
+
+```
+GET /api/users?name[like]=Alice&email[like]=bob&_or=name,email
+```
+
+Translates to: `WHERE (name LIKE '%Alice%' OR email LIKE '%bob%')`
+
+Nested AND/OR via JSON `_filter` parameter:
+```
+GET /api/users?_filter={"or":[{"and":[{"field":"name","op":"like","value":"A"},{"field":"score","op":"gt","value":90}]},{"field":"email","op":"like","value":"admin"}]}
+```
+
+### Response format
+
+#### Offset pagination response
+
 ```json
 {
-  "items": [...],
-  "page": 1,
-  "page_size": 20,
-  "total": 100,
-  "pages": 5
+  "data": [
+    { "id": 1, "name": "Alice" },
+    { "id": 2, "name": "Bob" }
+  ],
+  "pagination": {
+    "mode": "offset",
+    "total_records": 105,
+    "current_page": 2,
+    "per_page": 20,
+    "total_pages": 6,
+    "has_next": true,
+    "has_prev": true
+  }
 }
 ```
 
-Query parameters for list:
-- `page: int = 1` (1-indexed)
-- `page_size: int = 20` (max 100)
+#### Cursor pagination response
+
+```json
+{
+  "data": [
+    { "id": 21, "name": "Carol" },
+    { "id": 22, "name": "Dave" }
+  ],
+  "pagination": {
+    "mode": "cursor",
+    "has_next": true,
+    "has_prev": true,
+    "next_cursor": "MjI="
+  }
+}
+```
 
 Request/Response models are auto-generated:
 ```python
@@ -77,12 +171,32 @@ No new tables. Routes operate on the introspected database tables directly using
 - Column with UNIQUE constraint: validate uniqueness on create/update, return 409 on conflict.
 - Very large table list: route registration happens at startup, not per-request.
 - Invalid `page`/`page_size` values: clamp `page_size` to [1, 100], `page` to >= 1.
+- Invalid `limit` value for cursor mode: clamp to [1, 100].
+- Invalid cursor (malformed Base64 or non-existent PK): return 400 with descriptive error.
+- Cursor pagination on table with composite PK or no PK: fall back to offset mode, ignore cursor params.
+- Filter references non-existent column: silently ignore the filter (do not crash).
+- Filter references non-existent operator: return 400 with descriptive error.
+- `_or` references fields not present in query params: silently ignore those references.
+- `_filter` JSON is malformed: return 400 with descriptive error.
+- `like` operator: automatically wrap value with `%` on both sides for substring matching.
+- `in` operator: split value by comma, trim whitespace.
+- `is` operator: only accepts `null` or `not_null` as values.
 
 ## Acceptance Criteria
 - [ ] All 6 CRUD routes are registered per table (when PK exists).
 - [ ] Pydantic request models correctly reflect nullable/required fields.
 - [ ] Pydantic response models include all columns.
-- [ ] List endpoint supports `page`/`page_size` pagination.
+- [ ] List endpoint supports offset pagination (`page`/`page_size`).
+- [ ] List endpoint supports cursor pagination (`starting_after`/`ending_before`/`limit`).
+- [ ] Cursor values are Base64-encoded; response includes `next_cursor`.
+- [ ] List endpoint supports LHS Brackets filtering: `field[op]=value`.
+- [ ] All 9 filter operators work: eq, ne, gt, gte, lt, lte, like, in, is.
+- [ ] Multiple filters are ANDed by default.
+- [ ] `_or` parameter groups specified fields into OR conditions.
+- [ ] `_filter` JSON parameter supports nested AND/OR expressions.
+- [ ] Response format uses `data` array and `pagination` metadata object.
+- [ ] Offset mode response includes `mode`, `total_records`, `current_page`, `per_page`, `total_pages`, `has_next`, `has_prev`.
+- [ ] Cursor mode response includes `mode`, `has_next`, `has_prev`, `next_cursor`.
 - [ ] GET by PK returns 404 when row not found.
 - [ ] DELETE returns 204 on success, 404 when row not found.
 - [ ] PATCH updates only provided fields.

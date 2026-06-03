@@ -6,14 +6,23 @@ from typing import Any, get_type_hints
 
 import structlog
 from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
+from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel, create_model
+from pydantic.json_schema import GenerateJsonSchema
 from sqlalchemy import Table, Column, MetaData, select, insert, update, delete, text, func
 from sqlalchemy import Integer, String, Float, Boolean, Numeric
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from dbzap.core.introspector import ColumnInfo, TableInfo
+from dbzap.generators.filter import (
+    apply_filters,
+    decode_cursor,
+    encode_cursor,
+    parse_filters,
+)
 
 logger: Any = structlog.get_logger(__name__)
 
@@ -79,22 +88,84 @@ def _make_response_model(table: TableInfo) -> type[BaseModel]:
     return create_model(name, **fields)
 
 
-def _make_pagination_model(response_model_cls: type[BaseModel], table_name: str) -> type[BaseModel]:
-    """Create a paginated list response model with items, page, page_size, total, pages."""
+def _make_offset_pagination_model(response_model_cls: type[BaseModel], table_name: str) -> type[BaseModel]:
+    """Create an offset-paginated list response model with data array and pagination metadata."""
     item_list_type = list[response_model_cls]  # type: ignore[valid-type]
-    name = _pascal(table_name) + "Pagination"
+
+    offset_pagination_type = create_model(
+        _pascal(table_name) + "OffsetPagination",
+        mode=(str, ...),
+        total_records=(int, ...),
+        current_page=(int, ...),
+        per_page=(int, ...),
+        total_pages=(int, ...),
+        has_next=(bool, ...),
+        has_prev=(bool, ...),
+    )
+
+    name = _pascal(table_name) + "OffsetListResponse"
     return create_model(
         name,
-        items=(item_list_type, ...),
-        page=(int, ...),
-        page_size=(int, ...),
-        total=(int, ...),
-        pages=(int, ...),
+        data=(item_list_type, ...),
+        pagination=(offset_pagination_type, ...),
+    )
+
+
+def _make_cursor_pagination_model(response_model_cls: type[BaseModel], table_name: str) -> type[BaseModel]:
+    """Create a cursor-paginated list response model with data array and pagination metadata."""
+    item_list_type = list[response_model_cls]  # type: ignore[valid-type]
+
+    cursor_pagination_type = create_model(
+        _pascal(table_name) + "CursorPagination",
+        mode=(str, ...),
+        has_next=(bool, ...),
+        has_prev=(bool, ...),
+        next_cursor=(str | None, None),
+    )
+
+    name = _pascal(table_name) + "CursorListResponse"
+    return create_model(
+        name,
+        data=(item_list_type, ...),
+        pagination=(cursor_pagination_type, ...),
     )
 
 
 def _pascal(s: str) -> str:
     return "".join(w.capitalize() for w in re.split(r"[_\s]+", s))
+
+
+def _openapi_body_extra(model_cls: type[BaseModel]) -> dict[str, Any]:
+    return {
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": {"$ref": f"#/components/schemas/{model_cls.__name__}"},
+                },
+            },
+        },
+    }
+
+
+def _openapi_list_extra() -> dict[str, Any]:
+    params = [
+        {"name": "page", "in": "query", "schema": {"type": "integer", "default": 1}, "description": "Page number (1-indexed, offset mode)"},
+        {"name": "page_size", "in": "query", "schema": {"type": "integer", "default": 20}, "description": "Items per page (1-100, offset mode)"},
+        {"name": "limit", "in": "query", "schema": {"type": "integer", "default": 20}, "description": "Items per page (1-100, cursor mode)"},
+        {"name": "starting_after", "in": "query", "schema": {"type": "string"}, "description": "Cursor: fetch rows after this PK (base64)"},
+        {"name": "ending_before", "in": "query", "schema": {"type": "string"}, "description": "Cursor: fetch rows before this PK (base64)"},
+        {"name": "_or", "in": "query", "schema": {"type": "string"}, "description": "Comma-separated field names to combine with OR"},
+        {"name": "_filter", "in": "query", "schema": {"type": "string"}, "description": "JSON-encoded filter expression"},
+    ]
+    for op in ("eq", "ne", "gt", "gte", "lt", "lte", "like", "in", "is"):
+        params.append({
+            "name": f"field[{op}]",
+            "in": "query",
+            "schema": {"type": "string"},
+            "description": f"LHS Bracket filter: field {op} value",
+        })
+    return {"parameters": params}
 
 
 # ---------------------------------------------------------------------------
@@ -131,36 +202,61 @@ class RestApiGenerator:
         self._metadata = MetaData()
 
     def generate(self, app: FastAPI, tables: list[TableInfo]) -> None:
+        extra_models: list[type[BaseModel]] = []
         for table in tables:
-            self.generate_for_table(app, table)
+            extra_models.extend(self.generate_for_table(app, table))
+        if not extra_models:
+            return
 
-    def generate_for_table(self, app: FastAPI, table: TableInfo) -> None:
+        _orig_openapi = app.openapi
+
+        def _openapi() -> dict[str, Any]:
+            nonlocal extra_models
+            if not app.openapi_schema:
+                app.openapi_schema = _orig_openapi()
+                from pydantic import TypeAdapter
+                for model in extra_models:
+                    if model.__name__ not in app.openapi_schema.get("components", {}).get("schemas", {}):
+                        schema = TypeAdapter(model).json_schema(
+                            ref_template="#/components/schemas/{model}",
+                            schema_generator=GenerateJsonSchema,
+                        )
+                        defs = schema.pop("$defs", {})
+                        app.openapi_schema.setdefault("components", {}).setdefault("schemas", {})[model.__name__] = schema
+                        for def_name, def_schema in defs.items():
+                            if def_name not in app.openapi_schema["components"]["schemas"]:
+                                app.openapi_schema["components"]["schemas"][def_name] = def_schema
+            return app.openapi_schema
+
+        app.openapi = _openapi  # type: ignore[method-assign]
+
+    def generate_for_table(self, app: FastAPI, table: TableInfo) -> list[type[BaseModel]]:
         pk_cols = table.primary_key
         sa_tbl = _sa_table(table, self._metadata)
         create_model_cls = _make_create_model(table)
         update_model_cls = _make_update_model(table)
         response_model_cls = _make_response_model(table)
-        pagination_model_cls = _make_pagination_model(response_model_cls, table.name)
+        offset_pagination_model_cls = _make_offset_pagination_model(response_model_cls, table.name)
+        cursor_pagination_model_cls = _make_cursor_pagination_model(response_model_cls, table.name)
         engine = self._engine
 
         has_pk = len(pk_cols) > 0
         is_composite = len(pk_cols) > 1
+        single_int_pk = has_pk and not is_composite
 
         if not has_pk:
             logger.warning("table_no_pk", table=table.name)
 
         prefix = f"/api/{table.name}"
+        valid_columns = {col.name for col in table.columns}
 
         # --- POST (create) ---
         async def create_row(request: Request) -> Response:
             body = await request.json()
-            # Strip None values for columns that have DB defaults
             cleaned = {k: v for k, v in body.items() if v is not None}
-            # Validate via Pydantic
             try:
                 create_model_cls(**body)
             except Exception as exc:
-                from fastapi.responses import JSONResponse
                 return JSONResponse(status_code=422, content={"detail": str(exc)})
 
             async with engine.begin() as conn:
@@ -170,7 +266,6 @@ class RestApiGenerator:
                 except IntegrityError as exc:
                     raise HTTPException(status_code=409, detail="Unique constraint violated") from exc
 
-            # Fetch inserted row
             async with engine.connect() as conn:
                 if has_pk and not is_composite and row_id is not None:
                     pk_col = pk_cols[0]
@@ -187,36 +282,52 @@ class RestApiGenerator:
                 else:
                     row = None
 
-            from fastapi.responses import JSONResponse
             return JSONResponse(status_code=201, content=dict(row) if row else cleaned)
 
         app.add_api_route(prefix, create_row, methods=["POST"],
-                          responses={201: {"model": response_model_cls}})
+                          responses={201: {"model": response_model_cls}},
+                          openapi_extra=_openapi_body_extra(create_model_cls))
 
-        # --- GET (list) ---
-        async def list_rows(page: int = 1, page_size: int = 20) -> dict[str, Any]:
+        # --- GET (list) with filtering + dual pagination ---
+        async def list_rows(request: Request) -> dict[str, Any]:
+            params_list = list(request.query_params.multi_items())
+            params = dict(request.query_params)
+            page = int(params.get("page", 1))
+            page_size = int(params.get("page_size", 20))
+            limit = int(params.get("limit", 20))
+            starting_after = params.get("starting_after")
+            ending_before = params.get("ending_before")
+
             page = max(1, page)
             page_size = max(1, min(100, page_size))
-            offset = (page - 1) * page_size
+            limit = max(1, min(100, limit))
+
+            try:
+                conditions, or_fields = parse_filters(params_list, valid_columns)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+            use_cursor = single_int_pk and (starting_after or ending_before)
+            pk_col_name = pk_cols[0] if single_int_pk else None
+
             async with engine.connect() as conn:
-                total: int = (await conn.execute(select(func.count()).select_from(sa_tbl))).scalar_one()
-                rows = (
-                    await conn.execute(select(sa_tbl).offset(offset).limit(page_size))
-                ).mappings().all()
-            pages = (total + page_size - 1) // page_size if total else 0
-            return {
-                "items": [dict(r) for r in rows],
-                "page": page,
-                "page_size": page_size,
-                "total": total,
-                "pages": pages,
-            }
+                if use_cursor and pk_col_name:
+                    return await _cursor_list(
+                        conn, sa_tbl, pk_col_name, conditions, or_fields,
+                        limit, starting_after, ending_before,
+                    )
+                else:
+                    return await _offset_list(
+                        conn, sa_tbl, conditions, or_fields,
+                        page, page_size,
+                    )
 
         app.add_api_route(prefix, list_rows, methods=["GET"],
-                          responses={200: {"model": pagination_model_cls}})
+                          responses={200: {"model": offset_pagination_model_cls}},
+                          openapi_extra=_openapi_list_extra())
 
         if not has_pk:
-            return
+            return [create_model_cls, update_model_cls]
 
         # Routes that require PK
         if is_composite:
@@ -265,7 +376,8 @@ class RestApiGenerator:
                 return dict(row)  # type: ignore[arg-type]
 
             app.add_api_route(prefix + "/{pk}", full_update, methods=["PUT"],
-                              responses={200: {"model": response_model_cls}})
+                              responses={200: {"model": response_model_cls}},
+                              openapi_extra=_openapi_body_extra(update_model_cls))
 
             # --- PATCH (partial update) ---
             async def partial_update(pk: int, request: Request) -> dict[str, Any]:
@@ -298,7 +410,8 @@ class RestApiGenerator:
                 return dict(row)  # type: ignore[arg-type]
 
             app.add_api_route(prefix + "/{pk}", partial_update, methods=["PATCH"],
-                              responses={200: {"model": response_model_cls}})
+                              responses={200: {"model": response_model_cls}},
+                              openapi_extra=_openapi_body_extra(update_model_cls))
 
             # --- DELETE ---
             async def delete_row(pk: int) -> Response:
@@ -312,6 +425,102 @@ class RestApiGenerator:
 
             app.add_api_route(prefix + "/{pk}", delete_row, methods=["DELETE"],
                               responses={204: {"description": "No Content"}})
+
+        return [create_model_cls, update_model_cls]
+
+
+# ---------------------------------------------------------------------------
+# List helpers (offset + cursor pagination with filtering)
+# ---------------------------------------------------------------------------
+
+
+async def _offset_list(
+    conn: Any,
+    sa_tbl: Table,
+    conditions: list[dict[str, Any]],
+    or_fields: list[str],
+    page: int,
+    page_size: int,
+) -> dict[str, Any]:
+    base_q = select(sa_tbl)
+    base_q = apply_filters(base_q, sa_tbl, conditions, or_fields)
+
+    count_q = select(func.count()).select_from(base_q.subquery())
+    total: int = (await conn.execute(count_q)).scalar_one()
+
+    offset = (page - 1) * page_size
+    rows = (await conn.execute(base_q.offset(offset).limit(page_size))).mappings().all()
+
+    total_pages = (total + page_size - 1) // page_size if total else 0
+    return {
+        "data": [dict(r) for r in rows],
+        "pagination": {
+            "mode": "offset",
+            "total_records": total,
+            "current_page": page,
+            "per_page": page_size,
+            "total_pages": total_pages,
+            "has_next": page < total_pages,
+            "has_prev": page > 1,
+        },
+    }
+
+
+async def _cursor_list(
+    conn: Any,
+    sa_tbl: Table,
+    pk_col_name: str,
+    conditions: list[dict[str, Any]],
+    or_fields: list[str],
+    limit: int,
+    starting_after: str | None,
+    ending_before: str | None,
+) -> dict[str, Any]:
+    pk_col = sa_tbl.c[pk_col_name]
+    base_q = select(sa_tbl)
+    base_q = apply_filters(base_q, sa_tbl, conditions, or_fields)
+
+    forward = starting_after is not None
+    if forward:
+        try:
+            cursor_val = int(decode_cursor(starting_after))  # type: ignore[arg-type]
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid cursor: {starting_after!r}") from exc
+        base_q = base_q.where(pk_col > cursor_val).order_by(pk_col.asc())
+    elif ending_before:
+        try:
+            cursor_val = int(decode_cursor(ending_before))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid cursor: {ending_before!r}") from exc
+        base_q = base_q.where(pk_col < cursor_val).order_by(pk_col.desc())
+    else:
+        base_q = base_q.order_by(pk_col.asc())
+
+    rows = (await conn.execute(base_q.limit(limit + 1))).mappings().all()
+    has_more = len(rows) > limit
+    if has_more:
+        rows = rows[:limit]
+
+    if ending_before and not forward:
+        rows = list(reversed(rows))
+
+    next_cursor = encode_cursor(rows[-1][pk_col_name]) if rows and has_more else None
+
+    has_prev = False
+    if forward:
+        has_prev = True
+    elif ending_before:
+        has_prev = has_more
+
+    return {
+        "data": [dict(r) for r in rows],
+        "pagination": {
+            "mode": "cursor",
+            "has_next": has_more if forward else bool(ending_before and has_more),
+            "has_prev": has_prev,
+            "next_cursor": next_cursor,
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -390,7 +599,8 @@ def _register_pk_alias(
         return dict(row)  # type: ignore[arg-type]
 
     app.add_api_route(pk_path_segments, put_composite, methods=["PUT"],
-                      responses={200: {"model": response_model_cls}})
+                      responses={200: {"model": response_model_cls}},
+                      openapi_extra=_openapi_body_extra(update_model_cls))
 
     # PATCH
     async def patch_composite(request: Request) -> dict[str, Any]:
@@ -410,7 +620,8 @@ def _register_pk_alias(
         return dict(row)
 
     app.add_api_route(pk_path_segments, patch_composite, methods=["PATCH"],
-                      responses={200: {"model": response_model_cls}})
+                      responses={200: {"model": response_model_cls}},
+                      openapi_extra=_openapi_body_extra(update_model_cls))
 
     # DELETE
     async def delete_composite(request: Request) -> Response:

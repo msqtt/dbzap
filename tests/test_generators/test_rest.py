@@ -195,21 +195,26 @@ class TestList:
         resp = await client.get("/api/users")
         body = resp.json()
         assert isinstance(body, dict)
-        assert "items" in body
-        assert "page" in body
-        assert "page_size" in body
-        assert "total" in body
-        assert "pages" in body
+        assert "data" in body
+        assert "pagination" in body
+        pg = body["pagination"]
+        assert "mode" in pg
+        assert "total_records" in pg
+        assert "current_page" in pg
+        assert "per_page" in pg
+        assert "total_pages" in pg
+        assert "has_next" in pg
+        assert "has_prev" in pg
 
     async def test_list_pagination_page_size(self, client: AsyncClient) -> None:
         await self._seed(client)
         resp = await client.get("/api/users?page_size=2")
-        assert len(resp.json()["items"]) == 2
+        assert len(resp.json()["data"]) == 2
 
     async def test_list_pagination_page(self, client: AsyncClient) -> None:
         await self._seed(client)
-        all_rows: list[Any] = (await client.get("/api/users?page_size=5")).json()["items"]
-        page2: list[Any] = (await client.get("/api/users?page_size=2&page=2")).json()["items"]
+        all_rows: list[Any] = (await client.get("/api/users?page_size=5")).json()["data"]
+        page2: list[Any] = (await client.get("/api/users?page_size=2&page=2")).json()["data"]
         assert page2[0]["id"] == all_rows[2]["id"]
 
     async def test_list_page_size_clamped_to_100(self, client: AsyncClient) -> None:
@@ -217,13 +222,13 @@ class TestList:
             await client.post("/api/users", json={"name": f"U{i}", "email": f"ul{i}@x.com"})
         resp = await client.get("/api/users?page_size=9999")
         assert resp.status_code == 200
-        assert len(resp.json()["items"]) <= 100
+        assert len(resp.json()["data"]) <= 100
 
     async def test_list_default_page_size_20(self, client: AsyncClient) -> None:
         for i in range(25):
             await client.post("/api/users", json={"name": f"U{i}", "email": f"def{i}@x.com"})
         resp = await client.get("/api/users")
-        assert len(resp.json()["items"]) == 20
+        assert len(resp.json()["data"]) == 20
 
     async def test_list_negative_page_clamped(self, client: AsyncClient) -> None:
         resp = await client.get("/api/users?page=-5")
@@ -232,10 +237,11 @@ class TestList:
     async def test_list_pagination_metadata(self, client: AsyncClient) -> None:
         await self._seed(client)
         body = (await client.get("/api/users?page_size=2")).json()
-        assert body["page"] == 1
-        assert body["page_size"] == 2
-        assert body["total"] == 5
-        assert body["pages"] == 3
+        pg = body["pagination"]
+        assert pg["current_page"] == 1
+        assert pg["per_page"] == 2
+        assert pg["total_records"] == 5
+        assert pg["total_pages"] == 3
 
 
 # ---------------------------------------------------------------------------
@@ -393,4 +399,195 @@ class TestNoPkTable:
     async def test_no_pk_list(self, client: AsyncClient) -> None:
         resp = await client.get("/api/audit_log")
         assert resp.status_code == 200
-        assert "items" in resp.json()
+        assert "data" in resp.json()
+
+
+# ---------------------------------------------------------------------------
+# Filtering  GET /api/users?field[op]=value
+# ---------------------------------------------------------------------------
+
+
+class TestFiltering:
+    async def _seed(self, client: AsyncClient) -> None:
+        await client.post("/api/users", json={"name": "Alice", "email": "alice@x.com", "score": 95.0})
+        await client.post("/api/users", json={"name": "Bob", "email": "bob@x.com", "score": 80.0})
+        await client.post("/api/users", json={"name": "Carol", "email": "carol@x.com", "score": 65.0})
+        await client.post("/api/users", json={"name": "Dave", "email": "dave@x.com", "score": 50.0})
+
+    async def test_eq_filter(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        resp = await client.get("/api/users?name=Alice")
+        data = resp.json()["data"]
+        assert len(data) == 1
+        assert data[0]["name"] == "Alice"
+
+    async def test_eq_filter_bracket(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        resp = await client.get("/api/users?name[eq]=Bob")
+        data = resp.json()["data"]
+        assert len(data) == 1
+        assert data[0]["name"] == "Bob"
+
+    async def test_ne_filter(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        resp = await client.get("/api/users?name[ne]=Alice")
+        data = resp.json()["data"]
+        assert len(data) == 3
+
+    async def test_gt_filter(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        resp = await client.get("/api/users?score[gt]=80")
+        data = resp.json()["data"]
+        assert len(data) == 1
+        assert data[0]["name"] == "Alice"
+
+    async def test_gte_filter(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        resp = await client.get("/api/users?score[gte]=80")
+        data = resp.json()["data"]
+        assert len(data) == 2
+
+    async def test_lt_filter(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        resp = await client.get("/api/users?score[lt]=65")
+        data = resp.json()["data"]
+        assert len(data) == 1
+        assert data[0]["name"] == "Dave"
+
+    async def test_lte_filter(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        resp = await client.get("/api/users?score[lte]=65")
+        data = resp.json()["data"]
+        assert len(data) == 2
+
+    async def test_like_filter(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        resp = await client.get("/api/users?name[like]=li")
+        data = resp.json()["data"]
+        assert len(data) == 1
+        assert data[0]["name"] == "Alice"
+
+    async def test_in_filter(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        resp = await client.get("/api/users?name[in]=Alice,Carol")
+        data = resp.json()["data"]
+        assert len(data) == 2
+        names = {r["name"] for r in data}
+        assert names == {"Alice", "Carol"}
+
+    async def test_and_multiple_filters(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        resp = await client.get("/api/users?score[gte]=65&score[lte]=80")
+        data = resp.json()["data"]
+        assert len(data) == 2
+        names = {r["name"] for r in data}
+        assert names == {"Bob", "Carol"}
+
+    async def test_or_filter(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        resp = await client.get("/api/users?name[eq]=Alice&name[eq]=Bob&_or=name")
+        data = resp.json()["data"]
+        assert len(data) == 2
+
+    async def test_filter_nonexistent_field_ignored(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        resp = await client.get("/api/users?nonexistent=value")
+        assert resp.status_code == 200
+        assert len(resp.json()["data"]) == 4
+
+    async def test_filter_invalid_operator_returns_400(self, client: AsyncClient) -> None:
+        resp = await client.get("/api/users?name[badop]=value")
+        assert resp.status_code == 400
+
+    async def test_filter_combined_with_pagination(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        resp = await client.get("/api/users?score[gte]=65&page_size=1")
+        body = resp.json()
+        assert len(body["data"]) == 1
+        assert body["pagination"]["total_records"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Cursor pagination  GET /api/users?starting_after=...
+# ---------------------------------------------------------------------------
+
+
+class TestCursorPagination:
+    async def _seed(self, client: AsyncClient) -> None:
+        for i in range(10):
+            await client.post("/api/users", json={"name": f"User{i}", "email": f"cu{i}@x.com"})
+
+    @staticmethod
+    def _encode(pk: int) -> str:
+        import base64
+        return base64.urlsafe_b64encode(str(pk).encode()).decode()
+
+    async def test_cursor_first_page(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        resp = await client.get(f"/api/users?limit=3&starting_after={self._encode(0)}")
+        body = resp.json()
+        assert body["pagination"]["mode"] == "cursor"
+        assert len(body["data"]) == 3
+
+    async def test_cursor_has_next(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        resp = await client.get(f"/api/users?limit=3&starting_after={self._encode(0)}")
+        pg = resp.json()["pagination"]
+        assert pg["has_next"] is True
+        assert pg["next_cursor"] is not None
+
+    async def test_cursor_chain(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        all_ids: list[int] = []
+        cursor = self._encode(0)
+        for _ in range(4):
+            resp = await client.get(f"/api/users?limit=3&starting_after={cursor}")
+            body = resp.json()
+            all_ids.extend(r["id"] for r in body["data"])
+            if body["pagination"]["next_cursor"]:
+                cursor = body["pagination"]["next_cursor"]
+            else:
+                break
+        assert len(all_ids) == 10
+        assert len(set(all_ids)) == 10
+
+    async def test_cursor_no_duplicates(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        resp1 = await client.get(f"/api/users?limit=5&starting_after={self._encode(0)}")
+        cursor = resp1.json()["pagination"]["next_cursor"]
+        resp2 = await client.get(f"/api/users?limit=5&starting_after={cursor}")
+        ids1 = {r["id"] for r in resp1.json()["data"]}
+        ids2 = {r["id"] for r in resp2.json()["data"]}
+        assert ids1.isdisjoint(ids2)
+
+    async def test_cursor_last_page_no_next(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        all_resp = await client.get("/api/users?page_size=100")
+        last_id = all_resp.json()["data"][-1]["id"]
+        resp = await client.get(f"/api/users?limit=5&starting_after={self._encode(last_id)}")
+        body = resp.json()
+        assert len(body["data"]) == 0
+        assert body["pagination"]["has_next"] is False
+        assert body["pagination"]["next_cursor"] is None
+
+    async def test_cursor_invalid_returns_400(self, client: AsyncClient) -> None:
+        resp = await client.get("/api/users?starting_after=not-valid-base64!!!")
+        assert resp.status_code == 400
+
+    async def test_cursor_with_filter(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        resp = await client.get(f"/api/users?limit=10&starting_after={self._encode(0)}&name[like]=User1")
+        data = resp.json()["data"]
+        for row in data:
+            assert "User1" in row["name"]
+
+    async def test_cursor_ending_before(self, client: AsyncClient) -> None:
+        await self._seed(client)
+        all_resp = await client.get("/api/users?page_size=100")
+        last_id = all_resp.json()["data"][-1]["id"]
+        resp = await client.get(f"/api/users?limit=3&ending_before={self._encode(last_id)}")
+        body = resp.json()
+        assert body["pagination"]["mode"] == "cursor"
+        assert len(body["data"]) == 3
+        for row in body["data"]:
+            assert row["id"] < last_id

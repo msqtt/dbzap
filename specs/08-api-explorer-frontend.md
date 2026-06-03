@@ -69,8 +69,16 @@ Config source: `EXPLORER_USERNAME` and `EXPLORER_PASSWORD` environment variables
 #### 3. Request Builder
 - Method badge (GET/POST/PUT/PATCH/DELETE) + URL path
 - Path parameters: auto-detected input fields (e.g. `{id}`)
-- Query parameters: input fields for `page`, `page_size`, etc.
+- **Pagination mode toggle** (for list GET endpoints): Offset / Cursor segmented button
+  - **Offset mode**: shows `page` and `page_size` inputs
+  - **Cursor mode**: shows `limit`, `starting_after`, and `ending_before` inputs
+- **Filter section** (LHS Brackets, for list GET endpoints):
+  - Dynamic filter rows: each row has field input (with datalist autocomplete from table columns), operator dropdown (`eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `like`, `in`, `is`), value input, and remove button
+  - "+ Add filter" button appends new rows
+  - `_or` input for specifying comma-separated field names to combine with OR
+  - Filters are serialized as `field[op]=value` query params when sending
 - Request body: JSON editor (for POST/PUT/PATCH/GraphQL)
+  - **Auto-filled from OpenAPI spec**: for POST/PUT/PATCH endpoints, the body editor is pre-populated with a JSON template generated from the request body schema (`openapi_extra` → `components.schemas`)
 - Headers editor (pre-filled with `Authorization: Bearer <token>`)
 - Response format: auto-generated preview showing the expected response body structure (extracted from OpenAPI schema for REST with `$ref` resolution via `components.schemas`, from GraphQL introspection for GQL)
 - "Send" button
@@ -169,6 +177,12 @@ src/dbzap/server/static/
 - Circular `$ref` chains (schema A references B which references A): depth limit of 4 prevents infinite recursion, showing `...` at the cutoff.
 - Path parameter missing: "Send" button is disabled until all required path params are filled.
 - Invalid JSON in request body: highlight error, block send.
+- Empty request body for POST/PUT/PATCH when auto-template is `{}`: allow sending (server validates).
+- Pagination mode switched after filters are set: filters are preserved across mode switch.
+- Filter row with empty field or empty value: excluded from query string when sending.
+- No columns found for filter autocomplete (e.g. OpenAPI spec missing response schema): hide filter section.
+- Cursor mode used on a table without single integer PK: cursor params still sent; server falls back to offset pagination.
+- `starting_after` / `ending_before` contain invalid base64: server returns 400, displayed in response viewer.
 - Dashboard polling when tab is hidden (`document.hidden`): pause polling to save resources, resume on visibility change.
 - Dashboard polling when `/metrics` is unreachable: show "Metrics unavailable" banner, retry with exponential backoff (5s → 10s → 30s), do not crash.
 - Metrics endpoint returns empty body (fresh start, no requests yet): show "No data yet" placeholder on all cards, sparklines render as flat zero lines.
@@ -194,6 +208,15 @@ src/dbzap/server/static/
 - [ ] Response viewer shows status code, headers, formatted JSON body, and timing.
 - [ ] Response format preview resolves `$ref` references from `components.schemas` and shows expanded field structure (not `{ ...TypeName }`).
 - [ ] Response format preview renders clean JSON without double-escaped newlines in nested `$ref` types.
+- [ ] Pagination mode toggle (Offset/Cursor) appears on list GET endpoints and switches between offset params (`page`, `page_size`) and cursor params (`limit`, `starting_after`, `ending_before`).
+- [ ] Filter section appears on list GET endpoints with dynamic field/operator/value rows; "+ Add filter" appends rows; remove button deletes rows.
+- [ ] Filter field inputs include autocomplete datalist populated from table column names (extracted from OpenAPI response schema).
+- [ ] Filters are serialized as LHS Bracket query params (`field[op]=value`) when sending requests.
+- [ ] `_or` field is visible when at least one filter row exists.
+- [ ] Request body editor is auto-filled with a JSON template generated from the OpenAPI request body schema for POST/PUT/PATCH endpoints.
+- [ ] OpenAPI spec includes `requestBody` with `$ref` to Create/Update models for POST/PUT/PATCH routes.
+- [ ] OpenAPI spec includes Create/Update Pydantic models in `components.schemas`.
+- [ ] OpenAPI spec includes pagination and filter query parameters for list GET routes.
 - [ ] Hover over response headers or body reveals a "Copy" button; clicking copies content to clipboard and shows "Copied" feedback.
 - [ ] Auth token is automatically attached to requests.
 - [ ] Token expiry triggers a visible warning and login redirect.
