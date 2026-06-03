@@ -93,8 +93,33 @@ class MetricsCollector:
         """Render all metrics in Prometheus text exposition format."""
 
 
+def create_metrics_router(
+    collector: MetricsCollector,
+    pool_stats_provider: Callable[[], tuple[int, int, int]] | None = None,
+) -> APIRouter:
+    """Build the ``/metrics`` router.
+
+    ``pool_stats_provider`` is a zero-arg callable that returns
+    ``(pool_size, checked_out, overflow)``.  When provided, the router
+    refreshes the gauges on **every scrape** by calling the provider
+    just before rendering.  This keeps pool metrics live without
+    requiring background tasks or hooks at every checkout/checkin.
+    The app factory wires the provider to the engine's pool:
+
+        def _pool_stats() -> tuple[int, int, int]:
+            pool = engine.pool
+            return (pool.size(), pool.checkedout(), max(0, pool.overflow()))
+        app.include_router(create_metrics_router(collector, pool_stats_provider=_pool_stats))
+
+
 class PerformanceMiddleware(BaseHTTPMiddleware):
-    """FastAPI middleware that times every request and feeds MetricsCollector."""
+    """FastAPI middleware that times every request and feeds MetricsCollector.
+
+    MUST guarantee that ``in_progress`` is decremented exactly once for
+    every increment, including when ``record_request`` itself raises.
+    Use ``try/finally`` — never duplicate decrement calls in both the
+    happy and exception branches.
+    """
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         start = time.monotonic()
@@ -106,21 +131,58 @@ class PerformanceMiddleware(BaseHTTPMiddleware):
         return response
 ```
 
+### Route Resolution (path label normalization)
+
+`PerformanceMiddleware` MUST normalize the `path` label to the matched
+route template (e.g. `/api/users/{pk}`) — never the raw URL with the
+concrete ID — to keep metric cardinality bounded.
+
+Resolution order:
+
+1. **Primary path**: read `request.scope["route"]` (set by Starlette's
+   router during `call_next`). This is O(1) and is the path used in
+   nearly all real requests.
+2. **Fallback**: walk `app.routes` calling `route.matches(scope)` for
+   sub-mounts or unmatched paths. Result MAY be cached by route
+   template (NOT by raw path, because the raw path includes the
+   high-cardinality ID and would defeat the bound).
+3. **Last resort**: the raw URL path (unmatched 404). MUST NOT be
+   cached — it can grow unbounded.
+
+A naive `(method, raw_path) → template` cache is a bug: every concrete
+ID becomes a distinct key, the bound flips on/off in a tight loop, and
+no cache hit ever happens for paths with high cardinality. Prefer not
+caching the scope-route fast path at all.
+
 ## Performance Optimizations
 
-### 1. Database Connection Pool
+### 1. Database Connection Pool (Dialect-Aware)
+
+Pool sizing parameters (`pool_size`, `max_overflow`, `pool_timeout`,
+`pool_recycle`) only apply to server databases (PostgreSQL / MySQL). SQLite
+uses SQLAlchemy's `StaticPool` and **rejects** these kwargs with
+`TypeError: Invalid argument(s) 'pool_size','max_overflow' sent to
+create_engine()`. The engine factory MUST inspect the URL dialect and only
+forward pool kwargs for the dialects that accept them.
 
 ```python
-# In create_app()
-engine = create_async_engine(
-    settings.database_url,
-    pool_size=10,           # steady-state connections
-    max_overflow=20,        # burst capacity
-    pool_timeout=30,        # seconds to wait for a connection
-    pool_recycle=1800,      # recycle connections every 30 min (avoid stale)
-    pool_pre_ping=True,     # verify connection before use
-)
+def _build_engine(cfg: Settings) -> AsyncEngine:
+    url = _normalize_db_url(cfg.database_url)
+    kwargs = {"pool_pre_ping": True}
+    if url.startswith("postgresql") or url.startswith("mysql"):
+        kwargs.update(
+            pool_size=cfg.db_pool_size,
+            max_overflow=cfg.db_max_overflow,
+            pool_timeout=cfg.db_pool_timeout,
+            pool_recycle=cfg.db_pool_recycle,
+        )
+    # SQLite: keep StaticPool defaults; pool sizing flags would raise.
+    return create_async_engine(url, **kwargs)
 ```
+
+This factory MUST be reused **everywhere an engine is constructed** —
+notably both in `create_app()` and in `SchemaIntrospector.__init__`'s
+no-engine fallback path. Forgetting one site breaks SQLite at startup.
 
 Configurable via env:
 ```
@@ -130,16 +192,17 @@ DB_POOL_TIMEOUT=30
 DB_POOL_RECYCLE=1800
 ```
 
-### 2. Query Timeout
+### 2. Query Timeout (Dialect-Aware)
 
-All generated queries enforce a server-side statement timeout:
+Statement timeout enforcement depends on the dialect:
 
-```python
-# Set per-session
-await conn.execute(text("SET statement_timeout = '5s'"))
-```
+| Dialect    | Mechanism |
+|------------|-----------|
+| PostgreSQL | `connect_args={"server_settings": {"statement_timeout": "<ms>"}}` (asyncpg) |
+| MySQL      | `connect_args={"init_command": "SET SESSION MAX_EXECUTION_TIME=<ms>"}` (aiomysql) |
+| SQLite     | not enforced (no driver-level support; rely on app-level timeouts) |
 
-Configurable: `DB_STATEMENT_TIMEOUT=5s`
+Configurable: `DB_STATEMENT_TIMEOUT=5s` (parsed as `5s` / `500ms` / bare seconds).
 
 ### 3. Response Compression
 
@@ -154,9 +217,39 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 Introspected schema is cached after first load. No redundant DB round-trips for schema info.
 
-### 5. Connection Reuse
+### 5. Connection Reuse (Single Connection Per Mutation)
 
-All CRUD operations within a single request share one connection from the pool (via `AsyncSession`), not one connection per query.
+dbzap does not use ORM `AsyncSession`. CRUD operations use SQLAlchemy
+Core through `engine.connect()` / `engine.begin()`. Mutations that need
+to return the affected row MUST share **one connection** for the
+write + read-back, halving pool acquisitions per request:
+
+```python
+async with engine.connect() as conn:
+    async with conn.begin():
+        result = await conn.execute(insert(tbl).values(**data))
+    # Same connection, after commit — read-back observes the inserted row.
+    row = (await conn.execute(select(tbl).where(...))).mappings().first()
+```
+
+Wrapping the read-back in a separate `engine.connect()` call doubles
+pool round-trips per mutation, which becomes a bottleneck under load.
+
+### 6. Count Query Optimization (No Subquery Wrapping)
+
+List endpoints' `total` count MUST NOT wrap the full `SELECT *` in a
+subquery. Reuse the `WHERE` clause directly on the table so the planner
+can satisfy the count from indexes:
+
+```python
+# BAD: forces full row materialization through a derived table
+count_q = select(func.count()).select_from(base_q.subquery())
+
+# GOOD: index-friendly count, same WHERE clauses
+count_q = select(func.count()).select_from(sa_tbl)
+if base_q.whereclause is not None:
+    count_q = count_q.where(base_q.whereclause)
+```
 
 ## Data Model
 
@@ -175,16 +268,21 @@ No tables. All metrics are in-memory. Metrics are reset on process restart.
 - [ ] `PerformanceMiddleware` records duration and status for every HTTP request.
 - [ ] `GET /metrics` returns Prometheus-compatible text format.
 - [ ] Path labels are normalized to route patterns (no high cardinality).
-- [ ] `http_requests_in_progress` gauge increments/decrements correctly, including on errors.
-- [ ] Database pool stats (size, checked_out, overflow) are updated on each export.
+- [ ] `PerformanceMiddleware` resolves the route via `scope["route"]` (O(1)) before falling back to scanning `app.routes`.
+- [ ] `PerformanceMiddleware` does NOT cache by raw URL path — the cache, if any, MUST be keyed in a way that survives high-cardinality IDs.
+- [ ] `http_requests_in_progress` gauge increments/decrements correctly, including when `record_request` itself raises (use `try/finally`).
+- [ ] Database pool stats (size, checked_out, overflow) are refreshed on every `/metrics` scrape via `pool_stats_provider`.
 - [ ] `db_query_duration_seconds` histogram tracks per-table query performance.
-- [ ] Connection pool is configured with `pool_size`, `max_overflow`, `pool_recycle`, `pool_pre_ping`.
-- [ ] Query timeout is enforced server-side (`statement_timeout`).
+- [ ] Connection pool is configured with `pool_size`, `max_overflow`, `pool_recycle`, `pool_pre_ping` for PostgreSQL and MySQL only.
+- [ ] SQLite engine construction MUST NOT pass `pool_size`/`max_overflow`/`pool_timeout`/`pool_recycle` (would raise `TypeError`).
+- [ ] The dialect-aware engine factory is reused by `SchemaIntrospector`'s no-engine fallback path.
+- [ ] Query timeout is enforced server-side via dialect-appropriate connect_args (PG `server_settings`, MySQL `init_command`).
 - [ ] GZip compression is enabled for responses > 1KB.
 - [ ] `/healthz*` endpoints are excluded from metrics collection.
 - [ ] Metrics are thread-safe and async-safe.
 - [ ] No external dependency for metrics (no `prometheus_client` - implement text format directly).
 - [ ] All pool and timeout settings are configurable via environment variables.
+- [ ] Mutation routes (POST/PUT/PATCH) share a single connection for the write + read-back.
 
 ## Module Location
 - `src/dbzap/server/metrics.py` - `MetricsCollector` and `/metrics` route

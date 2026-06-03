@@ -200,6 +200,42 @@ class TestListQuery:
         result = await _gql(client, "{ users { totalCount edges { node { id } } } }")
         assert result["data"]["users"]["totalCount"] == 3
 
+    async def test_total_count_reflects_filter(self, client: AsyncClient) -> None:
+        """Bug 4 / spec 09: totalCount must reflect filter, not full table size."""
+        for i in range(5):
+            await _gql(
+                client,
+                f'mutation {{ createUsers(input: {{ name: "Xray{i}", email: "x{i}@x.com" }}) {{ id }} }}',
+            )
+        for i in range(3):
+            await _gql(
+                client,
+                f'mutation {{ createUsers(input: {{ name: "Yankee{i}", email: "y{i}@y.com" }}) {{ id }} }}',
+            )
+
+        result = await _gql(
+            client,
+            '{ users(filter: { name: { startsWith: "Xray" } }) { totalCount } }',
+        )
+        # Should be 5 (filtered), NOT 8 (full table count).
+        assert result["data"]["users"]["totalCount"] == 5
+
+    async def test_total_count_reflects_search(self, client: AsyncClient) -> None:
+        """Bug 4 / spec 09: totalCount must reflect global search, not full table."""
+        for i in range(3):
+            await _gql(
+                client,
+                f'mutation {{ createUsers(input: {{ name: "Alice{i}", email: "alice{i}@x.com" }}) {{ id }} }}',
+            )
+        for i in range(2):
+            await _gql(
+                client,
+                f'mutation {{ createUsers(input: {{ name: "Bob{i}", email: "bob{i}@x.com" }}) {{ id }} }}',
+            )
+
+        result = await _gql(client, '{ users(search: "alice") { totalCount } }')
+        assert result["data"]["users"]["totalCount"] == 3
+
 
 # ---------------------------------------------------------------------------
 # Query – filtering

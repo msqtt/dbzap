@@ -195,3 +195,27 @@ class TestSchemaIntrospector:
             assert "supersecret" not in str(exc_info.value)
         finally:
             await bad_engine.dispose()
+
+    # ------------------------------------------------------------------
+    # Regression: fallback engine MUST be dialect-aware (spec 10).
+    # Bug: when no engine is passed, __init__ hard-coded pool_size /
+    # max_overflow / pool_timeout / pool_recycle, which SQLite rejects
+    # with TypeError("Invalid argument(s) sent to create_engine()").
+    # ------------------------------------------------------------------
+    async def test_fallback_engine_supports_sqlite(self) -> None:
+        from dbzap.core.config import Settings
+        from dbzap.core.introspector import SchemaIntrospector
+
+        settings = Settings(  # type: ignore[call-arg]
+            database_url="sqlite+aiosqlite:///:memory:",
+            jwt_secret_key="test-introspector-fallback",
+        )
+        # Construction MUST NOT raise — fallback engine builder is
+        # required to skip pool sizing for SQLite.
+        introspector = SchemaIntrospector(settings=settings)
+        try:
+            tables = await introspector.introspect()
+        finally:
+            # Best-effort cleanup; introspector owns the engine here.
+            await introspector._engine.dispose()  # type: ignore[attr-defined]
+        assert tables == []

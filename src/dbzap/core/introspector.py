@@ -4,9 +4,10 @@ from typing import Any
 import structlog
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.engine import Connection, Inspector, make_url
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from dbzap.core.config import Settings, get_settings
+from dbzap.core.engine import build_engine
 from dbzap.core.type_mapping import map_sql_type_to_python
 
 logger: Any = structlog.get_logger(__name__)
@@ -49,14 +50,9 @@ class SchemaIntrospector:
         if engine is not None:
             self._engine = engine
         else:
-            s = settings or get_settings()
-            self._engine = create_async_engine(
-                s.database_url,
-                pool_size=s.db_pool_size,
-                max_overflow=s.db_max_overflow,
-                pool_timeout=s.db_pool_timeout,
-                pool_recycle=s.db_pool_recycle,
-            )
+            # Reuse the same dialect-aware factory as the app — otherwise a
+            # SQLite URL would crash here on ``pool_size`` kwargs.
+            self._engine = build_engine(settings or get_settings())
         self._cache: list[TableInfo] | None = None
 
     async def introspect(self) -> list[TableInfo]:

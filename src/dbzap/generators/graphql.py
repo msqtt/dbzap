@@ -454,6 +454,14 @@ async def resolver(
     base_q = _apply_filter_conditions(base_q, sa_tbl, filter)
     base_q = _apply_search(base_q, sa_tbl, search, string_columns)
 
+    # totalCount must reflect the *filtered* result set (Relay semantics —
+    # see specs/09-graphql-relay-filtering.md). Build a count query off
+    # the same WHERE clause, before any cursor narrowing or limit.
+    count_q = select(func.count()).select_from(sa_tbl)
+    where_filtered = base_q.whereclause
+    if where_filtered is not None:
+        count_q = count_q.where(where_filtered)
+
     # Cursor-based PK filtering
     if has_single_pk and pk_cols:
         pk_col_name = pk_cols[0]
@@ -483,7 +491,7 @@ async def resolver(
     base_q = base_q.limit(query_limit)
 
     async with engine.connect() as conn:
-        total = (await conn.execute(select(func.count()).select_from(sa_tbl))).scalar_one()
+        total = (await conn.execute(count_q)).scalar_one()
         rows = (await conn.execute(base_q)).mappings().all()
 
     has_more = len(rows) > limit

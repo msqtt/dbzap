@@ -117,6 +117,26 @@ type Query {
 - `search` performs a global OR search across all string/text columns using `LIKE '%value%'`
 - Empty or null filter fields are ignored
 
+### `totalCount` Semantics
+
+`totalCount` on a `Connection` returns the number of rows that match the
+**applied `filter` and `search`** — i.e. the total size of the filtered
+result set, *before* `first`/`last` slicing. Clients use it to compute
+total pages or "X of Y" indicators.
+
+```graphql
+{
+  users(first: 10, filter: { name: { contains: "al" } }) {
+    totalCount   # number of users matching name LIKE '%al%', e.g. 37
+    edges { node { id name } }   # at most 10 rows
+  }
+}
+```
+
+Concretely, the count query MUST share the same WHERE clauses as the
+edge query. A naive `SELECT COUNT(*) FROM tbl` (full-table count) is a
+bug because it leaks unfiltered totals to the client.
+
 ## Data Model
 
 No new database tables. Uses existing introspected schema.
@@ -135,7 +155,9 @@ No new database tables. Uses existing introspected schema.
 - [ ] `users(first: 2)` returns Relay Connection with `edges`, `pageInfo`, `totalCount`
 - [ ] `users(after: "...")` returns rows after the decoded cursor
 - [ ] `users(filter: { name: { contains: "Al" } })` returns matching rows
+- [ ] `users(filter: ...).totalCount` equals the number of rows that match the filter (NOT the full table size)
 - [ ] `users(search: "alice")` returns rows where any string column contains "alice"
+- [ ] `users(search: "alice").totalCount` equals the number of search-matching rows
 - [ ] Combined `filter` and `search` work together (AND logic)
 - [ ] Cursor pagination works for tables with single integer PK
 - [ ] `pageInfo.hasNextPage` / `hasPreviousPage` are computed correctly

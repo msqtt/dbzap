@@ -9,13 +9,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from dbzap.auth.dependencies import make_get_current_user
 from dbzap.auth.models import UserRecord
 from dbzap.auth.routes import create_auth_router
 from dbzap.auth.user_store import UserStore
 from dbzap.core.config import Settings, get_settings
+from dbzap.core.engine import build_engine
 from dbzap.core.introspector import SchemaIntrospector
 from dbzap.generators.graphql import GraphqlApiGenerator
 from dbzap.generators.rest import RestApiGenerator
@@ -28,78 +28,11 @@ logger: Any = structlog.get_logger(__name__)
 _INTERNAL_TABLES = {"_users"}
 _STATIC_DIR = Path(__file__).parent / "static"
 
-_SYNC_TO_ASYNC_SCHEMES = {
-    "mysql": "mysql+aiomysql",
-    "postgres": "postgresql+asyncpg",
-    "postgresql": "postgresql+asyncpg",
-}
-
-
-def _normalize_db_url(url: str) -> str:
-    for sync_scheme, async_scheme in _SYNC_TO_ASYNC_SCHEMES.items():
-        prefix = f"{sync_scheme}://"
-        if url.startswith(prefix):
-            return async_scheme + url[len(sync_scheme):]
-    return url
-
-
-def _parse_timeout_ms(value: str) -> int | None:
-    """Parse a duration string like ``5s`` / ``500ms`` / ``5`` into milliseconds.
-
-    Returns None for empty / invalid values so callers can skip configuration.
-    """
-    if not value:
-        return None
-    v = value.strip().lower()
-    try:
-        if v.endswith("ms"):
-            return max(0, int(float(v[:-2].strip())))
-        if v.endswith("s"):
-            return max(0, int(float(v[:-1].strip()) * 1000))
-        return max(0, int(float(v) * 1000))
-    except (ValueError, TypeError):
-        return None
-
-
-def _build_engine(cfg: Settings) -> AsyncEngine:
-    """Build the async engine with dialect-aware pool sizing and timeouts.
-
-    SQLite uses ``StaticPool`` and rejects ``pool_size``/``max_overflow``-style
-    keyword arguments, so they are only forwarded for server databases.
-    """
-    url = _normalize_db_url(cfg.database_url)
-    kwargs: dict[str, Any] = {"pool_pre_ping": True}
-    timeout_ms = _parse_timeout_ms(cfg.db_statement_timeout)
-
-    if url.startswith("postgresql"):
-        kwargs["pool_size"] = cfg.db_pool_size
-        kwargs["max_overflow"] = cfg.db_max_overflow
-        kwargs["pool_timeout"] = cfg.db_pool_timeout
-        kwargs["pool_recycle"] = cfg.db_pool_recycle
-        if timeout_ms:
-            # asyncpg honors `server_settings` to apply per-connection GUCs.
-            kwargs["connect_args"] = {
-                "server_settings": {"statement_timeout": str(timeout_ms)}
-            }
-    elif url.startswith("mysql"):
-        kwargs["pool_size"] = cfg.db_pool_size
-        kwargs["max_overflow"] = cfg.db_max_overflow
-        kwargs["pool_timeout"] = cfg.db_pool_timeout
-        kwargs["pool_recycle"] = cfg.db_pool_recycle
-        if timeout_ms:
-            # aiomysql executes ``init_command`` on every new connection.
-            kwargs["connect_args"] = {
-                "init_command": f"SET SESSION MAX_EXECUTION_TIME={timeout_ms}"
-            }
-    # SQLite: keep the default StaticPool; pool sizing flags would raise.
-
-    return create_async_engine(url, **kwargs)
-
 
 async def create_app(settings: Settings | None = None) -> FastAPI:
     cfg = settings or get_settings()
 
-    engine = _build_engine(cfg)
+    engine = build_engine(cfg)
 
     introspector = SchemaIntrospector(engine=engine)
     try:
