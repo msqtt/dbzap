@@ -29,10 +29,8 @@ requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
-packages = [{include = "dbzap", from = "src"}]
-
-[tool.poetry.package-data]
-dbzap = ["server/static/**/*"]
+packages = [{include = "dbzap", from = "src", format = "wheel"}]
+include = ["src/dbzap/server/static/**/*"]
 
 [dependency-groups]
 dev = [
