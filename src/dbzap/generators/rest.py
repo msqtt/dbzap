@@ -4,10 +4,10 @@ from __future__ import annotations
 import re
 from typing import Any
 
+import orjson
 import structlog
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, create_model
+from pydantic import BaseModel, ValidationError, create_model
 from pydantic.json_schema import GenerateJsonSchema
 from sqlalchemy import (
     Boolean,
@@ -271,11 +271,34 @@ class RestApiGenerator:
         # --- POST (create) ---
         async def create_row(request: Request) -> Response:
             body = await request.json()
-            cleaned = {k: v for k, v in body.items() if v is not None}
+            # Validate FIRST, then derive the insert payload from the validated
+            # model — never from the raw body (P0-2 / spec 04).
+            #
+            # Why ``model_dump(exclude_unset=True)``:
+            # * Drops fields the client did not send → server defaults still fire.
+            # * KEEPS fields the client explicitly set to ``null`` → SQL NULL
+            #   is written, not the column default. Filtering by ``v is not None``
+            #   silently swaps explicit null for the column default and
+            #   produces a value the client never asked for.
+            #
+            # ``except ValidationError`` only — bare ``except Exception`` would
+            # mask DB errors, coercion bugs, and IntegrityError as 422.
             try:
-                create_model_cls(**body)
-            except Exception as exc:
-                return JSONResponse(status_code=422, content={"detail": str(exc)})
+                validated = create_model_cls(**body)
+            except ValidationError as exc:
+                return Response(
+                    content=orjson.dumps({"detail": exc.errors()}),
+                    status_code=422,
+                    media_type="application/json",
+                )
+
+            payload = validated.model_dump(exclude_unset=True)
+            # NOTE: we intentionally do NOT strip primary-key columns here.
+            # * Composite PK tables (e.g. order_items): both PK columns are
+            #   required input — the client supplies them.
+            # * Single-int PK tables (e.g. users.id with INTEGER PRIMARY KEY):
+            #   the Create model already exposes the PK as Optional and
+            #   defaults to None, so unset clients get autoincrement.
 
             # Use a single connection for the insert + read-back, halving the
             # pool round-trips. The insert runs in its own transaction so that
@@ -283,7 +306,7 @@ class RestApiGenerator:
             async with engine.connect() as conn:
                 try:
                     async with conn.begin():
-                        result = await conn.execute(insert(sa_tbl).values(**cleaned))
+                        result = await conn.execute(insert(sa_tbl).values(**payload))
                         row_id = result.lastrowid
                 except IntegrityError as exc:
                     raise HTTPException(status_code=409, detail="Unique constraint violated") from exc
@@ -296,17 +319,25 @@ class RestApiGenerator:
                         )
                     ).mappings().first()
                 elif has_pk and is_composite:
-                    cond = _build_pk_condition(sa_tbl, pk_cols, cleaned)
+                    cond = _build_pk_condition(sa_tbl, pk_cols, payload)
                     row = (
                         await conn.execute(select(sa_tbl).where(*cond))
                     ).mappings().first()
                 else:
                     row = None
 
-            return JSONResponse(status_code=201, content=dict(row) if row else cleaned)
+            return Response(
+                content=orjson.dumps(
+                    dict(row) if row else payload,
+                    option=orjson.OPT_NON_STR_KEYS,
+                ),
+                status_code=201,
+                media_type="application/json",
+            )
 
         tbl_label = _pascal(table.name)
         app.add_api_route(prefix, create_row, methods=["POST"],
+                          tags=[table.name],
                           summary=f"{tbl_label} Create Row",
                           responses={201: {"model": response_model_cls}},
                           openapi_extra=_openapi_body_extra(create_model_cls))
@@ -317,12 +348,16 @@ class RestApiGenerator:
             params = dict(request.query_params)
             has_offset_params = "page" in params or "page_size" in params
             has_cursor_params = "limit" in params or "starting_after" in params or "ending_before" in params
-            page = int(params.get("page", 1))
-            page_size = int(params.get("page_size", 20))
-            limit = int(params.get("limit", 20))
+            try:
+                page = int(params.get("page", 1))
+                page_size = int(params.get("page_size", 20))
+                limit = int(params.get("limit", 20))
+            except (ValueError, TypeError) as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
             starting_after = params.get("starting_after")
             ending_before = params.get("ending_before")
             q = params.get("q", "")
+            with_total = params.get("with_total", "true").lower() != "false"
 
             page = max(1, page)
             page_size = max(1, min(100, page_size))
@@ -352,10 +387,11 @@ class RestApiGenerator:
                     return await _offset_list(
                         conn, sa_tbl, conditions,
                         q, string_columns,
-                        page, page_size,
+                        page, page_size, with_total,
                     )
 
         app.add_api_route(prefix, list_rows, methods=["GET"],
+                          tags=[table.name],
                           summary=f"{tbl_label} List Rows",
                           responses={200: {"model": offset_pagination_model_cls}},
                           openapi_extra=_openapi_list_extra())
@@ -388,21 +424,49 @@ class RestApiGenerator:
                 return dict(row)
 
             app.add_api_route(prefix + "/{pk}", get_row, methods=["GET"],
+                              tags=[table.name],
                               summary=f"{tbl_label} Get Row",
                               responses={200: {"model": response_model_cls}})
 
             # --- PUT (full update) ---
             async def full_update(pk: int, request: Request) -> dict[str, Any]:
                 body = await request.json()
+                # P0-3 / spec 04: validate via the Update pydantic model so
+                # type errors and unknown columns surface as 422 instead of
+                # leaking SQLAlchemy compile errors as 500.
+                try:
+                    validated = update_model_cls(**body)
+                except ValidationError as exc:
+                    raise HTTPException(status_code=422, detail=exc.errors())
+                # P1-10: PUT = full replacement. Fields NOT sent by the client
+                # are set to NULL (their model default). Use model_dump()
+                # WITHOUT exclude_unset so every non-PK column is included.
+                updates = {
+                    k: v
+                    for k, v in validated.model_dump().items()
+                    if k != pk_col_name
+                }
                 async with engine.connect() as conn:
                     async with conn.begin():
-                        result = await conn.execute(
-                            update(sa_tbl)
-                            .where(sa_tbl.c[pk_col_name] == pk)
-                            .values(**{k: v for k, v in body.items() if k != pk_col_name})
-                        )
-                    if result.rowcount == 0:
-                        raise HTTPException(status_code=404, detail="Not found")
+                        if updates:
+                            result = await conn.execute(
+                                update(sa_tbl)
+                                .where(sa_tbl.c[pk_col_name] == pk)
+                                .values(**updates)
+                            )
+                            if result.rowcount == 0:
+                                raise HTTPException(status_code=404, detail="Not found")
+                        else:
+                            # No fields to update — confirm row exists.
+                            exists = (
+                                await conn.execute(
+                                    select(sa_tbl.c[pk_col_name]).where(
+                                        sa_tbl.c[pk_col_name] == pk
+                                    )
+                                )
+                            ).first()
+                            if exists is None:
+                                raise HTTPException(status_code=404, detail="Not found")
                     row = (
                         await conn.execute(
                             select(sa_tbl).where(sa_tbl.c[pk_col_name] == pk)
@@ -411,6 +475,7 @@ class RestApiGenerator:
                 return dict(row)  # type: ignore[arg-type]
 
             app.add_api_route(prefix + "/{pk}", full_update, methods=["PUT"],
+                              tags=[table.name],
                               summary=f"{tbl_label} Update Row",
                               responses={200: {"model": response_model_cls}},
                               openapi_extra=_openapi_body_extra(update_model_cls))
@@ -418,7 +483,17 @@ class RestApiGenerator:
             # --- PATCH (partial update) ---
             async def partial_update(pk: int, request: Request) -> dict[str, Any]:
                 body = await request.json()
-                updates = {k: v for k, v in body.items() if v is not None and k != pk_col_name}
+                # P0-3 / spec 04: same validation as PUT. PATCH preserves
+                # explicit nulls so a client can clear a column.
+                try:
+                    validated = update_model_cls(**body)
+                except ValidationError as exc:
+                    raise HTTPException(status_code=422, detail=exc.errors())
+                updates = {
+                    k: v
+                    for k, v in validated.model_dump(exclude_unset=True).items()
+                    if k != pk_col_name
+                }
                 async with engine.connect() as conn:
                     if updates:
                         async with conn.begin():
@@ -439,6 +514,7 @@ class RestApiGenerator:
                 return dict(row)
 
             app.add_api_route(prefix + "/{pk}", partial_update, methods=["PATCH"],
+                              tags=[table.name],
                               summary=f"{tbl_label} Partial Update Row",
                               responses={200: {"model": response_model_cls}},
                               openapi_extra=_openapi_body_extra(update_model_cls))
@@ -454,6 +530,7 @@ class RestApiGenerator:
                 return Response(status_code=204)
 
             app.add_api_route(prefix + "/{pk}", delete_row, methods=["DELETE"],
+                              tags=[table.name],
                               summary=f"{tbl_label} Delete Row",
                               responses={204: {"description": "No Content"}})
 
@@ -473,24 +550,25 @@ async def _offset_list(
     string_columns: set[str],
     page: int,
     page_size: int,
+    with_total: bool = True,
 ) -> dict[str, Any]:
     base_q = select(sa_tbl)
     base_q = apply_filters(base_q, sa_tbl, conditions)
     base_q = apply_search(base_q, sa_tbl, q, string_columns)
 
-    # Reuse the WHERE clause directly on the table instead of wrapping the
-    # full ``SELECT *`` in a subquery — lets the planner satisfy the count
-    # from indexes without materializing every column.
-    count_q = select(func.count()).select_from(sa_tbl)
-    where = base_q.whereclause
-    if where is not None:
-        count_q = count_q.where(where)
-    total: int = (await conn.execute(count_q)).scalar_one()
+    # P3-26: skip count(*) when client passes ?with_total=false
+    total: int | None = None
+    if with_total:
+        count_q = select(func.count()).select_from(sa_tbl)
+        where = base_q.whereclause
+        if where is not None:
+            count_q = count_q.where(where)
+        total = (await conn.execute(count_q)).scalar_one()
 
     offset = (page - 1) * page_size
     rows = (await conn.execute(base_q.offset(offset).limit(page_size))).mappings().all()
 
-    total_pages = (total + page_size - 1) // page_size if total else 0
+    total_pages = (total + page_size - 1) // page_size if total else None
     return {
         "data": [dict(r) for r in rows],
         "pagination": {
@@ -499,7 +577,7 @@ async def _offset_list(
             "current_page": page,
             "per_page": page_size,
             "total_pages": total_pages,
-            "has_next": page < total_pages,
+            "has_next": (page < total_pages) if total_pages is not None else (len(rows) == page_size),
             "has_prev": page > 1,
         },
     }
@@ -608,6 +686,7 @@ def _register_composite_pk_routes(
         return dict(row)
 
     app.add_api_route(pk_path, get_composite, methods=["GET"],
+                      tags=[table_label] if table_label else None,
                       summary=f"{table_label} Get Row" if table_label else None,
                       responses={200: {"model": response_model_cls}})
     # Also register {pk} alias using / separator for test compatibility
@@ -635,17 +714,33 @@ def _register_pk_alias(
     async def put_composite(request: Request) -> dict[str, Any]:
         pk_values = {c: request.path_params[c] for c in pk_cols}
         body = await request.json()
-        updates = {k: v for k, v in body.items() if k not in pk_cols}
+        # P0-3 / spec 04: same validation parity as the single-PK PUT.
+        try:
+            validated = update_model_cls(**body)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.errors())
+        # P1-10: PUT = full replacement — unset fields become NULL.
+        updates = {
+            k: v
+            for k, v in validated.model_dump().items()
+            if k not in pk_cols
+        }
         cond = [sa_tbl.c[col] == val for col, val in pk_values.items()]
         async with engine.connect() as conn:
             async with conn.begin():
-                result = await conn.execute(update(sa_tbl).where(*cond).values(**updates))
-            if result.rowcount == 0:
-                raise HTTPException(status_code=404, detail="Not found")
+                if updates:
+                    result = await conn.execute(update(sa_tbl).where(*cond).values(**updates))
+                    if result.rowcount == 0:
+                        raise HTTPException(status_code=404, detail="Not found")
+                else:
+                    exists = (await conn.execute(select(*cond[0:1]).where(*cond))).first() if cond else None
+                    if exists is None:
+                        raise HTTPException(status_code=404, detail="Not found")
             row = (await conn.execute(select(sa_tbl).where(*cond))).mappings().first()
         return dict(row)  # type: ignore[arg-type]
 
     app.add_api_route(pk_path_segments, put_composite, methods=["PUT"],
+                      tags=[table_label] if table_label else None,
                       summary=f"{table_label} Update Row" if table_label else None,
                       responses={200: {"model": response_model_cls}},
                       openapi_extra=_openapi_body_extra(update_model_cls))
@@ -654,7 +749,15 @@ def _register_pk_alias(
     async def patch_composite(request: Request) -> dict[str, Any]:
         pk_values = {c: request.path_params[c] for c in pk_cols}
         body = await request.json()
-        updates = {k: v for k, v in body.items() if v is not None and k not in pk_cols}
+        try:
+            validated = update_model_cls(**body)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.errors())
+        updates = {
+            k: v
+            for k, v in validated.model_dump(exclude_unset=True).items()
+            if k not in pk_cols
+        }
         cond = [sa_tbl.c[col] == val for col, val in pk_values.items()]
         async with engine.connect() as conn:
             if updates:
@@ -668,6 +771,7 @@ def _register_pk_alias(
         return dict(row)
 
     app.add_api_route(pk_path_segments, patch_composite, methods=["PATCH"],
+                      tags=[table_label] if table_label else None,
                       summary=f"{table_label} Partial Update Row" if table_label else None,
                       responses={200: {"model": response_model_cls}},
                       openapi_extra=_openapi_body_extra(update_model_cls))
@@ -683,5 +787,6 @@ def _register_pk_alias(
         return Response(status_code=204)
 
     app.add_api_route(pk_path_segments, delete_composite, methods=["DELETE"],
+                      tags=[table_label] if table_label else None,
                       summary=f"{table_label} Delete Row" if table_label else None,
                       responses={204: {"description": "No Content"}})

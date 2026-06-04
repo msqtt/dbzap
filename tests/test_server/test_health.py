@@ -1,4 +1,3 @@
-from datetime import UTC
 
 import pytest
 from fastapi import FastAPI
@@ -95,8 +94,6 @@ async def test_readiness_body_shape(client: AsyncClient) -> None:
 
 
 async def test_readiness_503_when_db_unreachable() -> None:
-    from datetime import datetime
-
     from dbzap.core.introspector import SchemaIntrospector
     from dbzap.server.health import HealthCheck
 
@@ -105,7 +102,6 @@ async def test_readiness_503_when_db_unreachable() -> None:
     hc = HealthCheck(
         engine=bad_engine,
         introspector=introspector,
-        start_time=datetime.now(UTC),
     )
     status_code, body = await hc.readiness()
     assert status_code == 503

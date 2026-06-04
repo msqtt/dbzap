@@ -96,10 +96,10 @@ No tables. All data is runtime state.
 
 ```python
 class HealthCheck:
-    def __init__(self, engine: AsyncEngine, introspector: SchemaIntrospector, start_time: datetime):
+    def __init__(self, engine: AsyncEngine, introspector: SchemaIntrospector):
         self._engine = engine
         self._introspector = introspector
-        self._start_time = start_time
+        self._start_monotonic = time.monotonic()
 
     async def liveness(self) -> dict:
         """Process alive check - always returns ok."""

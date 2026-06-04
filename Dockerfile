@@ -19,9 +19,16 @@ WORKDIR /app
 
 COPY --from=builder /app/dist /app/dist
 
-RUN pip install --no-cache-dir /app/dist/*.whl && rm -rf /app/dist /root/.cache/pip
+RUN pip install --no-cache-dir /app/dist/*.whl && rm -rf /app/dist /root/.cache/pip \
+    && apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/* \
+    && useradd -r -s /usr/sbin/nologin dbzap
+
+USER dbzap
 
 EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:8000/healthz || exit 1
 
 ENTRYPOINT ["dbzap"]
 CMD ["serve"]

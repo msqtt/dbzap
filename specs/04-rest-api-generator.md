@@ -177,7 +177,7 @@ No new tables. Routes operate on the introspected database tables directly using
 - Column with NOT NULL and no default: required in Create model.
 - Column with UNIQUE constraint: validate uniqueness on create/update, return 409 on conflict.
 - Very large table list: route registration happens at startup, not per-request.
-- Invalid `page`/`page_size` values: clamp `page_size` to [1, 100], `page` to >= 1.
+- Invalid `page`/`page_size` values: clamp `page_size` to [1, 100], `page` to >= 1. Non-integer values (e.g. `?page=abc`) MUST return 422 with a descriptive error, not crash with an unhandled 500.
 - Invalid `limit` value for cursor mode: clamp to [1, 100].
 - Invalid cursor (malformed Base64 or non-existent PK): return 400 with descriptive error.
 - Cursor pagination on table with composite PK or no PK: fall back to offset mode, ignore cursor params.
@@ -186,9 +186,13 @@ No new tables. Routes operate on the introspected database tables directly using
 - `q` parameter on table with no string columns: silently ignored, no filtering applied.
 - `q` parameter combined with LHS Bracket filters: `q` ORs across string columns, result ANDed with bracket filters.
 - `q` value contains SQL special characters (`%`, `_`): escape them for safe LIKE matching.
-- `like` operator: automatically wrap value with `%` on both sides for substring matching.
+- `like` operator: automatically wrap value with `%` on both sides for substring matching. SQL wildcard characters (`%`, `_`) in user input MUST be escaped before being embedded in the LIKE pattern — otherwise a user can inject wildcards to match arbitrary patterns (e.g. `name[like]=_%` would match any name starting with any character).
 - `in` operator: split value by comma, trim whitespace.
 - `is` operator: only accepts `null` or `not_null` as values.
+- **Explicit `null` in request body** (POST/PUT/PATCH): a client sending `{"col": null}` for a nullable column MUST result in the column being written as SQL `NULL`, NOT silently dropped. Dropping it lets the column fall back to a SQL default and produces a value the client never asked for. Implementation: insert/update from the **validated pydantic model dumped with `exclude_unset=True`** so unset fields are excluded but fields explicitly set to `None` are preserved as `NULL`.
+- **Validation vs. server errors**: only `pydantic.ValidationError` MUST surface as 422. Other exceptions (DB connection drop, type-coercion bugs, etc.) MUST NOT be silently rewrapped as 422 — they belong on the 500 path or on a more specific 4xx like 409 for `IntegrityError`. Catching bare `Exception` here masks real bugs and breaks debugging.
+- **PUT/PATCH validation parity with POST**: PUT and PATCH MUST validate the request body against the auto-generated Update pydantic model — the same way POST validates against the Create model. Skipping validation for updates was the original P0-3 bug: a wrong-type field (e.g. ``"age": "abc"`` for an INTEGER column) reached SQLAlchemy and surfaced as a 500, and a misspelled column reached the engine and leaked schema details in the error response. After validation, type errors and unknown fields surface as a clean 422 from pydantic — no SQL execution attempted.
+- **Return type consistency**: All CRUD handler functions that can return either a success dict OR a `JSONResponse` (e.g. validation-error 422) MUST declare their return type as `Response` (from `starlette.responses`). This ensures mypy does not flag `JSONResponse` returns as incompatible with `dict[str, Any]`. FastAPI handles both dict and Response return values transparently at runtime.
 
 ## Acceptance Criteria
 - [ ] All 6 CRUD routes are registered per table (when PK exists).
@@ -214,6 +218,10 @@ No new tables. Routes operate on the introspected database tables directly using
 - [ ] OpenAPI docs (`/docs`) show all generated routes with correct schemas.
 - [ ] Tables without PK get only POST and list routes.
 - [ ] All SQL queries use parameterized statements.
+- [ ] Explicit `null` for a nullable column in the create body is written as SQL `NULL`, not silently dropped (no fall-through to column defaults).
+- [ ] Only `pydantic.ValidationError` surfaces as 422 from create routes — bare `except Exception` MUST NOT mask DB failures or coercion bugs as validation errors.
+- [ ] PUT and PATCH validate the request body against the Update pydantic model: type-mismatched fields surface as 422, unknown columns as 422 — never as a 500 leaked from SQLAlchemy.
+- [ ] PATCH preserves explicit `null` values (drops unset fields only), same semantics as POST.
 
 ## Module Location
 `src/dbzap/generators/rest.py`

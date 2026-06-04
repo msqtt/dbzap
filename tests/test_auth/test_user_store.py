@@ -106,3 +106,42 @@ async def test_seed_admin_user_idempotent(store: UserStore) -> None:
 
     assert verify_password("s3cureP@ss", user1.password_hash)
     assert verify_password("s3cureP@ss", user2.password_hash)
+
+
+async def test_seed_admin_user_handles_race(
+    store: UserStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P0-7 / spec 06: under multi-worker startup, two workers can both
+    observe ``get_by_username -> None`` and race to insert. The loser's
+    ``create_user`` raises ``IntegrityError`` from the unique constraint;
+    that MUST be swallowed and the loser should proceed to the
+    "exists" branch (and update the password hash if needed).
+
+    Simulated by forcing ``get_by_username`` to lie that the row is
+    missing on the first call, and then running seed twice in
+    succession — the second call hits IntegrityError on insert.
+    """
+    real_get = store.get_by_username
+    call = {"n": 0}
+
+    async def lying_get(username: str):
+        call["n"] += 1
+        if call["n"] <= 2:
+            return None  # pretend nobody is there
+        return await real_get(username)
+
+    monkeypatch.setattr(store, "get_by_username", lying_get)
+
+    # First seed actually creates the row.
+    await store.seed_admin_user("admin", "first-password")
+
+    # Second seed observes None (lying_get) → tries to insert → unique
+    # constraint fires. MUST NOT re-raise.
+    await store.seed_admin_user("admin", "second-password")
+
+    user = await real_get("admin")
+    assert user is not None
+    from dbzap.auth.passwords import verify_password
+
+    # The loser updated the hash to the new password.
+    assert verify_password("second-password", user.password_hash)

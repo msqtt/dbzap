@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60
     auth_mode: Literal["jwt", "basic", "both"] = "jwt"
+    # Brute-force protection on POST /auth/login. 0 disables the limiter
+    # (e.g. for tests or when fronted by an external limiter). See
+    # specs/06-auth.md > Rate limiting.
+    login_rate_limit_per_minute: int = 10
 
     # Server
     host: str = "0.0.0.0"

@@ -52,8 +52,11 @@ async function preFillCredentials() {
     const resp = await fetch('/explorer/config');
     if (!resp.ok) return;
     const cfg = await resp.json();
+    // Only username is pre-filled. The server intentionally does not return
+    // the password (P0-1 / spec 08): /explorer/config is anonymously
+    // reachable, so echoing the configured password would leak the admin
+    // credential to every visitor. The user types the password each login.
     if (cfg.username) document.getElementById('username').value = cfg.username;
-    if (cfg.password) document.getElementById('password').value = cfg.password;
   } catch {
     // Silently ignore — login form stays functional
   }

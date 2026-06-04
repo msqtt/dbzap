@@ -86,6 +86,7 @@ async def list_users(user: UserRecord = Depends(get_current_user)):
 | `EXPLORER_PASSWORD` | (none) | Admin password for seeding and Basic Auth |
 | `JWT_SECRET_KEY` | (required) | Secret for JWT signing (still required even in basic mode for startup) |
 | `JWT_EXPIRE_MINUTES` | `60` | JWT token lifetime in minutes |
+| `LOGIN_RATE_LIMIT_PER_MINUTE` | `10` | Max `POST /auth/login` attempts per IP per 60s sliding window. `0` disables the limiter. |
 
 ## Data Model
 
@@ -110,6 +111,28 @@ At startup, `UserStore.initialize()` creates the `_users` table if it does not e
   - If the user already exists: update the password hash if it no longer matches (allows password rotation via `.env` change + restart).
 - If either is not set: skip seeding (no admin user is created; login will fail until credentials are configured).
 
+#### Multi-worker concurrency
+
+`uvicorn --workers N` spawns N processes that each run `create_app()`
+and therefore each call `seed_admin_user()` on the same database. The
+naive sequence — `get_by_username` → branch on `None` → `create_user` —
+has a window where two workers both observe `None`, both try to insert,
+and the second loses with `IntegrityError`.
+
+`seed_admin_user` MUST be safe under this race:
+
+1. Attempt the `INSERT`.
+2. On `IntegrityError` (the row already exists, planted by a peer
+   worker), recover by reading the row back and proceeding to the
+   "user exists" branch — i.e. update the password hash if it no
+   longer matches the configured password.
+3. Never re-raise the `IntegrityError`; the desired end-state has been
+   reached either by us or by the winning worker.
+
+This is the standard "INSERT … ON CONFLICT UPDATE" pattern at the
+application layer, written portably so it works on PostgreSQL, MySQL,
+and SQLite without dialect-specific upsert syntax.
+
 ## Security Requirements
 
 ### Constant-time login
@@ -126,6 +149,46 @@ timing. Both successful and failed paths MUST take comparable time:
 bcrypt verification dominates the request time (~100 ms vs ~1 ms for a
 DB lookup), so without this dummy step an attacker can enumerate valid
 usernames simply by measuring response times.
+
+### Rate limiting on /auth/login
+
+`POST /auth/login` MUST be rate-limited to prevent online password
+brute-force. Without this, an attacker enumerates ~36000 passwords
+per hour against a single IP (bcrypt at ~100 ms each) — fast enough
+to break short numeric passwords or weak passphrases.
+
+Requirements:
+- Per-IP sliding-window limiter, configurable. Default: 10 attempts
+  per 60 seconds. Configurable via `LOGIN_RATE_LIMIT_PER_MINUTE` env
+  var (set `0` to disable).
+- IP key: `request.client.host`. When the request comes through a
+  trusted proxy, the standard FastAPI proxy headers handling applies
+  to populating `request.client.host`. dbzap does not implement its
+  own `X-Forwarded-For` parsing.
+- On limit-exceeded: respond `429 Too Many Requests` with
+  `Retry-After: <seconds>` header pointing at the oldest in-window
+  attempt's expiry. The body MUST NOT depend on the username — the
+  same response is returned for any rate-limit hit.
+- The 429 path MUST short-circuit BEFORE `verify_password` runs —
+  otherwise the limiter would consume the bcrypt budget it is meant
+  to protect (the limiter exists to prevent attackers from running
+  bcrypt at all).
+- Limiter state is in-process memory (a `SlidingWindowLimiter`
+  instance lives on the `UserStore`'s app factory). For multi-worker
+  deployments and horizontal scale, a shared backend (Redis) is the
+  next step but out of scope for the initial fix — the in-process
+  limiter still cuts the per-worker brute-force rate by orders of
+  magnitude and is the difference between "trivial brute-force" and
+  "needs a coordinated botnet".
+- A counter MUST be exposed via `MetricsCollector` (or returned in a
+  separate label on `http_requests_total`) so operators can see when
+  rate-limit kicks in. Initial implementation: simply counts as a
+  `429` request to `/auth/login` in `http_requests_total`, which
+  already exists; no new metric is required for this fix.
+
+Successful logins do NOT reset the counter. Each attempt — successful
+or not — counts. This is the simplest correct behavior; otherwise an
+attacker can interleave a known-good login to refresh the budget.
 
 ### bcrypt password length
 
@@ -173,6 +236,11 @@ pre-hash so verification stays consistent.
 - [ ] No `/auth/register` endpoint exists.
 - [ ] Admin user is seeded from `EXPLORER_USERNAME` / `EXPLORER_PASSWORD` at startup.
 - [ ] If admin user already exists, password hash is updated on restart.
+- [ ] `seed_admin_user` is safe under multi-worker concurrent startup: a `IntegrityError` from a peer worker's winning insert MUST NOT propagate; the loser falls through to the "user exists" branch and updates the password hash if needed.
+- [ ] `POST /auth/login` is rate-limited per client IP via a sliding window (default 10/min). The 11th attempt within the window returns `429 Too Many Requests` with a `Retry-After` header.
+- [ ] The 429 path MUST short-circuit before `verify_password` runs — the bcrypt budget is the resource the limiter protects.
+- [ ] Different IPs are independent (one client's flood does not lock out another client).
+- [ ] `LOGIN_RATE_LIMIT_PER_MINUTE=0` disables the limiter (e.g. for tests or for environments that put a CDN-level limiter in front).
 
 ## Module Location
 `src/dbzap/auth/`

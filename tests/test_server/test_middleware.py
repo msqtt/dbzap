@@ -169,10 +169,9 @@ async def test_in_progress_decrements_when_record_request_raises() -> None:
 
     Without try/finally, a raise inside record_request would skip the
     decrement and the gauge would drift up monotonically.
-    """
-    from starlette.requests import Request
-    from starlette.responses import Response
 
+    Exercised against the pure-ASGI ``__call__`` path (P0-6 / spec 10).
+    """
     from dbzap.server.metrics import MetricsCollector
     from dbzap.server.middleware import PerformanceMiddleware
 
@@ -183,19 +182,21 @@ async def test_in_progress_decrements_when_record_request_raises() -> None:
     collector = BoomCollector()
     assert collector._in_progress == 0
 
-    async def _app(scope, receive, send):  # pragma: no cover
+    async def inner_app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    mw = PerformanceMiddleware(app=inner_app, collector=collector)
+
+    async def receive() -> dict:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(_msg: dict) -> None:
         pass
 
-    mw = PerformanceMiddleware(app=_app, collector=collector)
-
-    async def call_next(request: Request) -> Response:
-        return Response(b"ok")
-
     scope = _http_scope("GET", "/api/anything")
-    request = Request(scope)
-
     with pytest.raises(RuntimeError, match="collector boom"):
-        await mw.dispatch(request, call_next)
+        await mw(scope, receive, send)
 
     assert collector._in_progress == 0, (
         "in_progress leaked when record_request raised — missing try/finally"
@@ -203,26 +204,157 @@ async def test_in_progress_decrements_when_record_request_raises() -> None:
 
 
 async def test_in_progress_decrements_when_call_next_raises() -> None:
-    """Bug 3 (companion): exception in downstream handler must still decrement."""
-    from starlette.requests import Request
+    """Bug 3 (companion): exception in downstream handler must still decrement.
 
+    Exercised against the pure-ASGI ``__call__`` path.
+    """
     from dbzap.server.metrics import MetricsCollector
     from dbzap.server.middleware import PerformanceMiddleware
 
     collector = MetricsCollector()
 
+    async def inner_app(scope, receive, send):
+        raise ValueError("downstream blew up")
+
+    mw = PerformanceMiddleware(app=inner_app, collector=collector)
+
+    async def receive() -> dict:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(_msg: dict) -> None:
+        pass
+
+    scope = _http_scope("GET", "/api/anything")
+    with pytest.raises(ValueError, match="downstream blew up"):
+        await mw(scope, receive, send)
+
+    assert collector._in_progress == 0
+
+
+def test_middleware_is_pure_asgi_not_basehttpmiddleware() -> None:
+    """P0-6 / spec 10: PerformanceMiddleware MUST be a plain ASGI 3
+    callable. Inheriting BaseHTTPMiddleware re-materializes responses
+    through a StreamingResponse and adds 30-50% overhead on small JSON
+    responses — exactly the workload dbzap optimizes.
+    """
+    from starlette.middleware.base import BaseHTTPMiddleware
+
+    from dbzap.server.middleware import PerformanceMiddleware
+
+    assert not issubclass(PerformanceMiddleware, BaseHTTPMiddleware), (
+        "PerformanceMiddleware still inherits BaseHTTPMiddleware — "
+        "switch to pure ASGI to avoid response re-buffering"
+    )
+    # Sanity: must be invocable as ASGI (i.e. expose async __call__).
+    import inspect
+
+    assert callable(PerformanceMiddleware)
+    assert inspect.iscoroutinefunction(PerformanceMiddleware.__call__)
+
+
+async def test_middleware_passes_response_body_unchanged() -> None:
+    """Pure-ASGI implementation must NOT re-buffer the body — bytes go
+    through verbatim, in the same number of messages, with no
+    ``StreamingResponse`` wrapping.
+    """
+    from dbzap.server.metrics import MetricsCollector
+    from dbzap.server.middleware import PerformanceMiddleware
+
+    sent: list[dict] = []
+
+    async def inner_app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 201, "headers": [(b"x-custom", b"yes")]})
+        await send({"type": "http.response.body", "body": b"hello", "more_body": True})
+        await send({"type": "http.response.body", "body": b"-world", "more_body": False})
+
+    async def receive() -> dict:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(msg: dict) -> None:
+        sent.append(msg)
+
+    collector = MetricsCollector()
+    mw = PerformanceMiddleware(app=inner_app, collector=collector)
+    await mw(scope=_http_scope("POST", "/api/anything"), receive=receive, send=send)
+
+    # 1 start + 2 body messages, in order, with bodies preserved.
+    assert [m["type"] for m in sent] == [
+        "http.response.start",
+        "http.response.body",
+        "http.response.body",
+    ]
+    assert sent[0]["status"] == 201
+    assert sent[0]["headers"] == [(b"x-custom", b"yes")]
+    assert sent[1]["body"] == b"hello"
+    assert sent[1]["more_body"] is True
+    assert sent[2]["body"] == b"-world"
+    assert sent[2]["more_body"] is False
+
+
+# ---------------------------------------------------------------------------
+# P0-8: unmatched URLs MUST collapse to a single sentinel label,
+# otherwise random 404 traffic explodes metrics cardinality.
+# ---------------------------------------------------------------------------
+
+
+def test_unmatched_path_collapses_to_sentinel_label() -> None:
+    """A raw URL with no matching route MUST resolve to ``/__unmatched__``,
+    not to the request path. Otherwise an attacker can hit
+    ``/spam-${random}`` in a loop and balloon the metrics dict.
+    """
+    from starlette.requests import Request
+
+    from dbzap.server.metrics import MetricsCollector
+    from dbzap.server.middleware import PerformanceMiddleware
+
     async def _app(scope, receive, send):  # pragma: no cover
         pass
 
-    mw = PerformanceMiddleware(app=_app, collector=collector)
+    mw = PerformanceMiddleware(app=_app, collector=MetricsCollector())
 
-    async def call_next(request: Request):
-        raise ValueError("downstream blew up")
+    for i in range(50):
+        scope = _http_scope("GET", f"/random-junk-{i}")
+        # No scope["route"], no matching app.routes — fallback fires.
+        request = Request(scope)
+        resolved = mw._resolve_route(request)
+        assert resolved == "/__unmatched__", (
+            f"unmatched URL {scope['path']} resolved to {resolved!r} — "
+            "raw URLs leak through to metrics labels and explode cardinality"
+        )
 
-    scope = _http_scope("GET", "/api/anything")
-    request = Request(scope)
 
-    with pytest.raises(ValueError, match="downstream blew up"):
-        await mw.dispatch(request, call_next)
+async def test_unmatched_paths_dont_explode_metrics_cardinality() -> None:
+    """Integration: a flood of distinct unmatched URLs must produce ONE
+    metrics entry, not N. Goes end-to-end through the ASGI ``__call__``.
+    """
+    from dbzap.server.metrics import MetricsCollector
+    from dbzap.server.middleware import PerformanceMiddleware
 
-    assert collector._in_progress == 0
+    collector = MetricsCollector()
+
+    async def inner_app(scope, receive, send):
+        # Pretend every request 404s.
+        await send({"type": "http.response.start", "status": 404, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    mw = PerformanceMiddleware(app=inner_app, collector=collector)
+
+    async def receive() -> dict:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(_msg: dict) -> None:
+        pass
+
+    for i in range(50):
+        await mw(scope=_http_scope("GET", f"/spam-{i}"), receive=receive, send=send)
+
+    paths = {key[1] for key in collector._request_counts}
+    assert paths == {"/__unmatched__"}, (
+        f"expected only the sentinel label, got {sorted(paths)} — high-cardinality "
+        "leak into metrics"
+    )
+    # And only one duration-bucket entry per (method, sentinel, le).
+    sentinel_buckets = [
+        key for key in collector._duration_buckets if key[1] == "/__unmatched__"
+    ]
+    assert len(sentinel_buckets) == 9  # one per histogram bucket boundary

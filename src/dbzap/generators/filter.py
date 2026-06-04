@@ -138,7 +138,8 @@ def _build_single_condition(
     if op == "lte":
         return cast(ColumnElement[bool], col <= raw)
     if op == "like":
-        return cast(ColumnElement[bool], col.like(f"%{raw}%"))
+        escaped = raw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        return cast(ColumnElement[bool], col.like(f"%{escaped}%"))
     if op == "in":
         vals = [v.strip() for v in raw.split(",") if v.strip()]
         return cast(ColumnElement[bool], col.in_(vals))

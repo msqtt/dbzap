@@ -76,6 +76,7 @@ No new tables. Orchestrates existing modules.
 - Port already in use: uvicorn raises `OSError`, propagated to CLI output.
 - `_users` table must be excluded from introspection results before passing to generators.
 - **CORS unsafe combination**: when `cors_origins == ["*"]` the factory MUST coerce `allow_credentials` to `False` regardless of what the user configured (or what the default would be). This combination is invalid per W3C CORS spec and modern browsers reject any response that sets both `Access-Control-Allow-Origin: *` and `Access-Control-Allow-Credentials: true`. A noisy log warning SHOULD be emitted when the coercion happens.
+- **OpenAPI docs access**: Since `/openapi.json` is protected behind authentication, the built-in `/docs` (Swagger UI) and `/redoc` pages MUST also be disabled (by setting `docs_url=None, redoc_url=None` on the FastAPI app). Leaving them public creates a confusing UX where the page loads but cannot fetch the API spec. The explorer UI serves as the interactive documentation frontend.
 
 ## Acceptance Criteria
 - [ ] `create_app()` returns a working FastAPI application.

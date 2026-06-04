@@ -1,4 +1,5 @@
 import asyncio
+import importlib.metadata
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -9,7 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from dbzap.core.introspector import SchemaIntrospector
 
-_VERSION = "0.1.0"
+try:
+    _VERSION = importlib.metadata.version("dbzap")
+except importlib.metadata.PackageNotFoundError:
+    _VERSION = "0.0.0-dev"
 
 
 def _now_iso() -> str:
@@ -22,7 +26,6 @@ class HealthCheck:
         *,
         engine: AsyncEngine,
         introspector: SchemaIntrospector,
-        start_time: datetime,
     ) -> None:
         self._engine = engine
         self._introspector = introspector
@@ -119,10 +122,16 @@ def create_health_router(
 
     @router.get("/ready")
     async def readiness() -> Any:
-        from fastapi.responses import JSONResponse
+        from fastapi import Response
+
+        import orjson
 
         status_code, body = await health.readiness()
-        return JSONResponse(content=body, status_code=status_code)
+        return Response(
+            content=orjson.dumps(body),
+            status_code=status_code,
+            media_type="application/json",
+        )
 
     @router.get("/detail")
     async def detail(_user: Any = Depends(get_current_user)) -> dict[str, Any]:

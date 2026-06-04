@@ -5,16 +5,17 @@ import base64
 import dataclasses
 import datetime
 import decimal
-import json
 import re
 import sys
 import types
 import uuid
-from typing import Any, Optional, cast
+from typing import Any, Optional, cast, get_args
 
+import orjson
 import strawberry
 import structlog
 from fastapi import FastAPI
+from graphql import GraphQLError  # noqa: F401
 
 # NOTE: many of these imports look unused statically, but they are
 # referenced *by name* inside the resolver source strings compiled via
@@ -84,13 +85,47 @@ def _safe_name(table_name: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _cursor_default(o: Any) -> str:
+    """JSON encoder hook for non-JSON-native PK types.
+
+    Cursors are opaque tokens — clients only echo them back as ``after`` /
+    ``before`` arguments — so stringifying once is sufficient. ``datetime``
+    / ``date`` / ``time`` use ``isoformat()`` for stability; everything
+    else falls back to ``str(o)``. ``bytes`` is decoded as latin-1 to
+    survive arbitrary binary without padding/escaping. See P0-5 / spec 05
+    edge case "Cursor encoding".
+    """
+    if isinstance(o, datetime.datetime | datetime.date | datetime.time):
+        return o.isoformat()
+    if isinstance(o, uuid.UUID | decimal.Decimal):
+        return str(o)
+    if isinstance(o, bytes):
+        return o.decode("latin-1")
+    return str(o)
+
+
+def _serialize_row(row_dict: dict[str, Any], json_columns: frozenset[str]) -> dict[str, Any]:
+    """Convert dict/list column values to JSON strings for GraphQL output (P1-13)."""
+    if not json_columns:
+        return row_dict
+    for col in json_columns:
+        v = row_dict.get(col)
+        if isinstance(v, (dict, list)):
+            row_dict[col] = orjson.dumps(v).decode()
+    return row_dict
+
+
 def _encode_cursor(pk_values: dict[str, Any]) -> str:
-    return base64.urlsafe_b64encode(json.dumps(pk_values).encode()).decode()
+    # P3-28: orjson natively handles datetime, UUID, Decimal — no custom
+    # default needed for these types. Still use _cursor_default for edge cases.
+    return base64.urlsafe_b64encode(
+        orjson.dumps(pk_values, default=_cursor_default)
+    ).decode()
 
 
 def _decode_cursor(token: str) -> dict[str, Any]:
     try:
-        return cast("dict[str, Any]", json.loads(base64.urlsafe_b64decode(token.encode()).decode()))
+        return cast("dict[str, Any]", orjson.loads(base64.urlsafe_b64decode(token.encode())))
     except Exception as exc:
         raise ValueError(f"Invalid cursor: {token!r}") from exc
 
@@ -228,11 +263,11 @@ def _make_create_input(table: TableInfo, ns: dict[str, Any]) -> type[Any]:
     for col in table.columns:
         if col.is_primary_key:
             gt = _gql_type(col.python_type)
-            fields.append((col.name, Optional[gt], dataclasses.field(default=None)))
+            fields.append((col.name, Optional[gt], dataclasses.field(default=strawberry.UNSET)))
             continue
         gt = _gql_type(col.python_type)
         if col.nullable or col.default is not None:
-            fields.append((col.name, Optional[gt], dataclasses.field(default=None)))
+            fields.append((col.name, Optional[gt], dataclasses.field(default=strawberry.UNSET)))
         else:
             fields.append((col.name, gt, dataclasses.field(default=strawberry.UNSET)))
     name = _pascal(_safe_name(table.name)) + "CreateInput"
@@ -251,7 +286,7 @@ def _make_update_input(table: TableInfo, ns: dict[str, Any]) -> type[Any]:
         if col.is_primary_key:
             continue
         gt = _gql_type(col.python_type)
-        fields.append((col.name, Optional[gt], dataclasses.field(default=None)))
+        fields.append((col.name, Optional[gt], dataclasses.field(default=strawberry.UNSET)))
     name = _pascal(_safe_name(table.name)) + "UpdateInput"
     if not fields:
         fields = [("_placeholder", Optional[str], dataclasses.field(default=None))]
@@ -342,43 +377,71 @@ def _sa_table(table: TableInfo, metadata: MetaData) -> Table:
 # ---------------------------------------------------------------------------
 
 
-def _apply_filter_conditions(query: Any, sa_tbl: Table, filter_input: Any) -> Any:
+def _apply_filter_conditions(query: Any, sa_tbl: Table, filter_input: Any, col_fields: dict[str, list[str]] | None = None) -> Any:
     """Apply GraphQL filter input to a SQLAlchemy query."""
     if filter_input is None:
         return query
     from sqlalchemy import and_ as sa_and
     parts: list[Any] = []
-    # Iterate dataclass fields directly to avoid the recursive deep-copy that
-    # ``dataclasses.asdict`` performs on every request.
-    for f in dataclasses.fields(filter_input):
-        col_name = f.name
-        if col_name.startswith("_"):
-            continue
-        op_input = getattr(filter_input, col_name, None)
-        if op_input is None or col_name not in sa_tbl.c:
-            continue
-        col = sa_tbl.c[col_name]
-        for sf in dataclasses.fields(op_input):
-            op = sf.name
-            value = getattr(op_input, op, None)
-            if value is None:
+
+    # P3-27: Use precomputed col_fields mapping when available to avoid
+    # calling dataclasses.fields() on every request.
+    if col_fields is not None:
+        for col_name, ops in col_fields.items():
+            op_input = getattr(filter_input, col_name, None)
+            if op_input is None or col_name not in sa_tbl.c:
                 continue
-            if op == "eq":
-                parts.append(col == value)
-            elif op == "gt":
-                parts.append(col > value)
-            elif op == "lt":
-                parts.append(col < value)
-            elif op == "gte":
-                parts.append(col >= value)
-            elif op == "lte":
-                parts.append(col <= value)
-            elif op == "contains":
-                escaped = str(value).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-                parts.append(col.like(f"%{escaped}%"))
-            elif op == "startsWith":
-                escaped = str(value).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-                parts.append(col.like(f"{escaped}%"))
+            col = sa_tbl.c[col_name]
+            for op in ops:
+                value = getattr(op_input, op, None)
+                if value is None:
+                    continue
+                if op == "eq":
+                    parts.append(col == value)
+                elif op == "gt":
+                    parts.append(col > value)
+                elif op == "lt":
+                    parts.append(col < value)
+                elif op == "gte":
+                    parts.append(col >= value)
+                elif op == "lte":
+                    parts.append(col <= value)
+                elif op == "contains":
+                    escaped = str(value).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                    parts.append(col.like(f"%{escaped}%"))
+                elif op == "startsWith":
+                    escaped = str(value).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                    parts.append(col.like(f"{escaped}%"))
+    else:
+        for f in dataclasses.fields(filter_input):
+            col_name = f.name
+            if col_name.startswith("_"):
+                continue
+            op_input = getattr(filter_input, col_name, None)
+            if op_input is None or col_name not in sa_tbl.c:
+                continue
+            col = sa_tbl.c[col_name]
+            for sf in dataclasses.fields(op_input):
+                op = sf.name
+                value = getattr(op_input, op, None)
+                if value is None:
+                    continue
+                if op == "eq":
+                    parts.append(col == value)
+                elif op == "gt":
+                    parts.append(col > value)
+                elif op == "lt":
+                    parts.append(col < value)
+                elif op == "gte":
+                    parts.append(col >= value)
+                elif op == "lte":
+                    parts.append(col <= value)
+                elif op == "contains":
+                    escaped = str(value).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                    parts.append(col.like(f"%{escaped}%"))
+                elif op == "startsWith":
+                    escaped = str(value).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                    parts.append(col.like(f"{escaped}%"))
     if parts:
         query = query.where(sa_and(*parts))
     return query
@@ -457,6 +520,8 @@ def _list_resolver(
     pk_cols: list[str],
     string_columns: set[str],
     has_single_pk: bool,
+    json_columns: frozenset[str] = frozenset(),
+    col_fields: dict[str, list[str]] | None = None,
 ) -> Any:
     out_name = out_type.__name__
     edge_name = edge_type.__name__
@@ -485,7 +550,7 @@ async def resolver(
     query_limit = limit + 1  # fetch one extra to detect hasMore
 
     base_q = select(sa_tbl)
-    base_q = _apply_filter_conditions(base_q, sa_tbl, filter)
+    base_q = _apply_filter_conditions(base_q, sa_tbl, filter, col_fields)
     base_q = _apply_search(base_q, sa_tbl, search, string_columns)
 
     # totalCount must reflect the *filtered* result set (Relay semantics —
@@ -528,6 +593,23 @@ async def resolver(
         total = (await conn.execute(count_q)).scalar_one()
         rows = (await conn.execute(base_q)).mappings().all()
 
+        # P1-14: For backward pagination, hasNextPage must check if items
+        # exist AFTER the before cursor (not just bool(before)).
+        has_next_backward = False
+        if not forward and before and has_single_pk and pk_cols:
+            pk_col_name = pk_cols[0]
+            pk_col = sa_tbl.c[pk_col_name]
+            try:
+                before_val = _decode_cursor(before).get(pk_col_name)
+                if before_val is not None:
+                    next_q = select(func.count()).select_from(sa_tbl)
+                    if where_filtered is not None:
+                        next_q = next_q.where(where_filtered)
+                    next_q = next_q.where(pk_col >= before_val)
+                    has_next_backward = (await conn.execute(next_q)).scalar_one() > 0
+            except (ValueError, Exception):
+                pass
+
     has_more = len(rows) > limit
     if has_more:
         rows = rows[:limit]
@@ -538,6 +620,7 @@ async def resolver(
     edges = []
     for row in rows:
         row_dict = dict(row)
+        _serialize_row(row_dict, json_columns)
         if pk_cols:
             cursor_vals = {{c: row_dict[c] for c in pk_cols}}
         else:
@@ -545,7 +628,7 @@ async def resolver(
         edges.append({edge_name}(node={out_name}(**row_dict), cursor=_encode_cursor(cursor_vals)))
 
     page_info = {page_info_name}(
-        hasNextPage=(has_more if forward else bool(before)),
+        hasNextPage=(has_more if forward else has_next_backward),
         hasPreviousPage=(bool(after) if forward else has_more),
         startCursor=edges[0].cursor if edges else None,
         endCursor=edges[-1].cursor if edges else None,
@@ -564,23 +647,26 @@ async def resolver(
         "pk_cols": pk_cols,
         "string_columns": string_columns,
         "has_single_pk": has_single_pk,
+        "json_columns": json_columns,
+        "col_fields": col_fields,
     })
 
 
-def _byid_single_resolver(sa_tbl: Table, pk: str, engine: AsyncEngine, out_type: type[Any]) -> Any:
+def _byid_single_resolver(sa_tbl: Table, pk: str, engine: AsyncEngine, out_type: type[Any], pk_python_type: type[Any] = int, json_columns: frozenset[str] = frozenset()) -> Any:
     out_name = out_type.__name__
+    gql_type = _gql_type(pk_python_type).__name__
     src = f"""
-async def resolver(id: int) -> Optional[{out_name}]:
+async def resolver(id: {gql_type}) -> Optional[{out_name}]:
     async with engine.connect() as conn:
         row = (await conn.execute(select(sa_tbl).where(sa_tbl.c[pk] == id))).mappings().first()
     if row is None:
         return None
-    return {out_name}(**dict(row))
+    return {out_name}(**_serialize_row(dict(row), json_columns))
 """
-    return _build_resolver(src, {out_name: out_type, "sa_tbl": sa_tbl, "pk": pk, "engine": engine})
+    return _build_resolver(src, {out_name: out_type, "sa_tbl": sa_tbl, "pk": pk, "engine": engine, "json_columns": json_columns})
 
 
-def _byid_composite_resolver(sa_tbl: Table, pk_cols: list[str], engine: AsyncEngine, out_type: type[Any]) -> Any:
+def _byid_composite_resolver(sa_tbl: Table, pk_cols: list[str], engine: AsyncEngine, out_type: type[Any], json_columns: frozenset[str] = frozenset()) -> Any:
     out_name = out_type.__name__
     params = ", ".join(f"{c}: int" for c in pk_cols)
     cond_expr = "[" + ", ".join(f"sa_tbl.c['{c}'] == {c}" for c in pk_cols) + "]"
@@ -591,14 +677,15 @@ async def resolver({params}) -> Optional[{out_name}]:
         row = (await conn.execute(select(sa_tbl).where(*cond))).mappings().first()
     if row is None:
         return None
-    return {out_name}(**dict(row))
+    return {out_name}(**_serialize_row(dict(row), json_columns))
 """
-    return _build_resolver(src, {out_name: out_type, "sa_tbl": sa_tbl, "engine": engine})
+    return _build_resolver(src, {out_name: out_type, "sa_tbl": sa_tbl, "engine": engine, "json_columns": json_columns})
 
 
 def _create_resolver(
     sa_tbl: Table, pk_cols: list[str], engine: AsyncEngine,
     out_type: type[Any], input_type: type[Any],
+    json_columns: frozenset[str] = frozenset(),
 ) -> Any:
     out_name = out_type.__name__
     in_name = input_type.__name__
@@ -616,7 +703,7 @@ async def resolver(input: {in_name}) -> {out_name}:
         if name.startswith("_placeholder"):
             continue
         v = getattr(input, name)
-        if v is None or v is strawberry.UNSET:
+        if v is strawberry.UNSET:
             continue
         cleaned[name] = v
     async with engine.begin() as conn:
@@ -624,34 +711,45 @@ async def resolver(input: {in_name}) -> {out_name}:
             result = await conn.execute(insert(sa_tbl).values(**cleaned))
             row_id = result.lastrowid
         except IntegrityError as exc:
-            raise Exception("Unique constraint violated") from exc
+            # P0-4 / spec 05: surface as a typed GraphQL error so clients
+            # can branch on extensions.code rather than parsing free-form
+            # text. A bare ``raise Exception(...)`` was previously masked
+            # as "Internal server error" with no error code.
+            raise GraphQLError(
+                "Unique constraint violated",
+                extensions={{"code": "CONFLICT"}},
+            ) from exc
     async with engine.connect() as conn:
         row = (await conn.execute({pk_fetch})).mappings().first()
     if row is None:
         return {out_name}(**cleaned)
-    return {out_name}(**dict(row))
+    return {out_name}(**_serialize_row(dict(row), json_columns))
 """
     return _build_resolver(src, {
         out_name: out_type, in_name: input_type,
         "sa_tbl": sa_tbl, "pk_cols": pk_cols, "engine": engine,
+        "json_columns": json_columns,
     })
 
 
 def _update_resolver(
     sa_tbl: Table, pk: str, engine: AsyncEngine,
     out_type: type[Any], input_type: type[Any],
+    pk_python_type: type[Any] = int,
+    json_columns: frozenset[str] = frozenset(),
 ) -> Any:
     out_name = out_type.__name__
     in_name = input_type.__name__
+    gql_type = _gql_type(pk_python_type).__name__
     src = f"""
-async def resolver(id: int, input: {in_name}) -> Optional[{out_name}]:
+async def resolver(id: {gql_type}, input: {in_name}) -> Optional[{out_name}]:
     updates = {{}}
     for f in dataclasses.fields(input):
         name = f.name
         if name.startswith("_placeholder"):
             continue
         v = getattr(input, name)
-        if v is None:
+        if v is strawberry.UNSET:
             continue
         updates[name] = v
     if updates:
@@ -663,17 +761,19 @@ async def resolver(id: int, input: {in_name}) -> Optional[{out_name}]:
         row = (await conn.execute(select(sa_tbl).where(sa_tbl.c[pk] == id))).mappings().first()
     if row is None:
         return None
-    return {out_name}(**dict(row))
+    return {out_name}(**_serialize_row(dict(row), json_columns))
 """
     return _build_resolver(src, {
         out_name: out_type, in_name: input_type,
         "sa_tbl": sa_tbl, "pk": pk, "engine": engine,
+        "json_columns": json_columns,
     })
 
 
-def _delete_resolver(sa_tbl: Table, pk: str, engine: AsyncEngine) -> Any:
-    src = """
-async def resolver(id: int) -> bool:
+def _delete_resolver(sa_tbl: Table, pk: str, engine: AsyncEngine, pk_python_type: type[Any] = int) -> Any:
+    gql_type = _gql_type(pk_python_type).__name__
+    src = f"""
+async def resolver(id: {gql_type}) -> bool:
     async with engine.begin() as conn:
         result = await conn.execute(delete(sa_tbl).where(sa_tbl.c[pk] == id))
     return result.rowcount > 0
@@ -747,6 +847,24 @@ class GraphqlApiGenerator:
             create_input = _make_create_input(table, ns)
             update_input = _make_update_input(table, ns)
             filter_input = _make_table_filter(table, ns)
+            # P3-27: Precompute column→operator field names at generate time
+            # so runtime doesn't call dataclasses.fields() per request.
+            col_fields: dict[str, list[str]] = {}
+            for f in dataclasses.fields(filter_input):
+                if f.name.startswith("_"):
+                    continue
+                # f.type is Optional[SomeFilter] — unwrap to get the actual type
+                ft = f.type
+                args = get_args(ft)
+                resolved = None
+                for arg in args:
+                    if arg is type(None):
+                        continue
+                    if dataclasses.is_dataclass(arg):
+                        resolved = arg
+                        break
+                if resolved is not None:
+                    col_fields[f.name] = [sf.name for sf in dataclasses.fields(resolved)]
             sa_tbl = _sa_table(table, self._metadata)
             pk_cols = table.primary_key
             pascal = _pascal(_safe_name(table.name))
@@ -757,6 +875,11 @@ class GraphqlApiGenerator:
                 col.name for col in table.columns
                 if col.python_type is str
             }
+
+            json_columns = frozenset(
+                col.name for col in table.columns
+                if col.python_type in (dict, list)
+            )
 
             _claim(out_type, create_input, update_input, filter_input)
             extra_types.extend([out_type, create_input, update_input, filter_input])
@@ -779,6 +902,7 @@ class GraphqlApiGenerator:
             lr = _list_resolver(
                 sa_tbl, self._engine, out_type, edge_type, conn_type,
                 page_info_type, filter_input, pk_cols, string_columns, has_single_pk,
+                json_columns, col_fields,
             )
             lr.__module__ = iso_name
             query_fields[camel] = strawberry.field(resolver=lr)
@@ -786,16 +910,20 @@ class GraphqlApiGenerator:
 
             # By-ID query
             if pk_cols:
+                pk_col_info = next(
+                    (c for c in table.columns if c.name == pk_cols[0]), None
+                )
+                pk_type = pk_col_info.python_type if pk_col_info else int
                 if len(pk_cols) == 1:
-                    bir = _byid_single_resolver(sa_tbl, pk_cols[0], self._engine, out_type)
+                    bir = _byid_single_resolver(sa_tbl, pk_cols[0], self._engine, out_type, pk_type, json_columns)
                 else:
-                    bir = _byid_composite_resolver(sa_tbl, pk_cols, self._engine, out_type)
+                    bir = _byid_composite_resolver(sa_tbl, pk_cols, self._engine, out_type, json_columns)
                 bir.__module__ = iso_name
                 query_fields[f"{camel}ById"] = strawberry.field(resolver=bir)
                 query_annotations[f"{camel}ById"] = Optional[out_type]
 
             # Create mutation
-            cr = _create_resolver(sa_tbl, pk_cols, self._engine, out_type, create_input)
+            cr = _create_resolver(sa_tbl, pk_cols, self._engine, out_type, create_input, json_columns)
             cr.__module__ = iso_name
             mutation_fields[f"create{pascal}"] = strawberry.field(resolver=cr)
             mutation_annotations[f"create{pascal}"] = out_type
@@ -806,13 +934,13 @@ class GraphqlApiGenerator:
             pk = pk_cols[0]
 
             # Update mutation
-            ur = _update_resolver(sa_tbl, pk, self._engine, out_type, update_input)
+            ur = _update_resolver(sa_tbl, pk, self._engine, out_type, update_input, pk_type, json_columns)
             ur.__module__ = iso_name
             mutation_fields[f"update{pascal}"] = strawberry.field(resolver=ur)
             mutation_annotations[f"update{pascal}"] = Optional[out_type]
 
             # Delete mutation
-            dr = _delete_resolver(sa_tbl, pk, self._engine)
+            dr = _delete_resolver(sa_tbl, pk, self._engine, pk_type)
             dr.__module__ = iso_name
             mutation_fields[f"delete{pascal}"] = strawberry.field(resolver=dr)
             mutation_annotations[f"delete{pascal}"] = bool

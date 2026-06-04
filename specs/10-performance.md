@@ -112,24 +112,36 @@ def create_metrics_router(
         app.include_router(create_metrics_router(collector, pool_stats_provider=_pool_stats))
 
 
-class PerformanceMiddleware(BaseHTTPMiddleware):
-    """FastAPI middleware that times every request and feeds MetricsCollector.
+class PerformanceMiddleware:
+    """Pure ASGI middleware that times every request and feeds MetricsCollector.
 
-    MUST guarantee that ``in_progress`` is decremented exactly once for
-    every increment, including when ``record_request`` itself raises.
-    Use ``try/finally`` — never duplicate decrement calls in both the
-    happy and exception branches.
+    MUST be implemented as a plain ASGI 3 callable (``async def __call__(
+    scope, receive, send)``) — NOT as ``starlette.middleware.base.
+    BaseHTTPMiddleware``. ``BaseHTTPMiddleware`` materializes responses
+    into a ``StreamingResponse`` and bridges send/receive across an
+    extra task; Starlette's own docs warn it is significantly slower
+    (often 30-50% on small JSON responses) and breaks streaming for
+    large responses. Since dbzap is performance-sensitive (see this
+    spec) and uses GZipMiddleware downstream, the request-timing layer
+    must not re-buffer the response.
+
+    Implementation contract:
+    * Wrap the inner app via ``await self.app(scope, receive, send_wrapper)``.
+    * ``send_wrapper`` snoops ``http.response.start`` to capture the
+      status code, then forwards the message untouched. Body messages
+      pass through verbatim.
+    * MUST guarantee that ``in_progress`` is decremented exactly once
+      for every increment, including when the inner app or
+      ``record_request`` itself raises. Use ``try/finally`` — never
+      duplicate decrement calls in both the happy and exception
+      branches.
     """
 
-    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
-        start = time.monotonic()
-        self.collector.set_in_progress(...)  # increment
-        response = await call_next(request)
-        duration = time.monotonic() - start
-        self.collector.record_request(request.method, request.url.path, response.status_code, duration)
-        self.collector.set_in_progress(...)  # decrement
-        return response
-```
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        # ... time, capture status from http.response.start, record metrics
+
 
 ### Route Resolution (path label normalization)
 
@@ -146,8 +158,14 @@ Resolution order:
    sub-mounts or unmatched paths. Result MAY be cached by route
    template (NOT by raw path, because the raw path includes the
    high-cardinality ID and would defeat the bound).
-3. **Last resort**: the raw URL path (unmatched 404). MUST NOT be
-   cached — it can grow unbounded.
+3. **Last resort (no match found)**: collapse to a single sentinel
+   label `"/__unmatched__"`. The raw URL MUST NOT be used here. An
+   attacker can hit `/spam-${random}` in a tight loop — every distinct
+   path would become a new entry in `MetricsCollector._request_counts`,
+   `_duration_sum`, `_duration_count`, and `_duration_buckets`,
+   exploding memory and slowing `export_prometheus()`. The sentinel
+   keeps unmatched-404 traffic at O(1) cardinality regardless of the
+   request volume.
 
 A naive `(method, raw_path) → template` cache is a bug: every concrete
 ID becomes a distinct key, the bound flips on/off in a tight loop, and
@@ -266,10 +284,12 @@ No tables. All metrics are in-memory. Metrics are reset on process restart.
 
 ## Acceptance Criteria
 - [ ] `PerformanceMiddleware` records duration and status for every HTTP request.
+- [ ] `PerformanceMiddleware` is implemented as a plain ASGI 3 callable, NOT as `starlette.middleware.base.BaseHTTPMiddleware`. The latter materializes responses into a `StreamingResponse` and adds 30-50% overhead on small responses (see Starlette docs); the timing layer must not re-buffer the body.
 - [ ] `GET /metrics` returns Prometheus-compatible text format.
 - [ ] Path labels are normalized to route patterns (no high cardinality).
 - [ ] `PerformanceMiddleware` resolves the route via `scope["route"]` (O(1)) before falling back to scanning `app.routes`.
 - [ ] `PerformanceMiddleware` does NOT cache by raw URL path — the cache, if any, MUST be keyed in a way that survives high-cardinality IDs.
+- [ ] Unmatched paths (e.g. random URLs that return 404) are collapsed to a single sentinel label (`"/__unmatched__"`) before recording — never sent verbatim to `MetricsCollector` (would let attackers explode memory by hitting random URLs).
 - [ ] `http_requests_in_progress` gauge increments/decrements correctly, including when `record_request` itself raises (use `try/finally`).
 - [ ] Database pool stats (size, checked_out, overflow) are refreshed on every `/metrics` scrape via `pool_stats_provider`.
 - [ ] `db_query_duration_seconds` histogram tracks per-table query performance.

@@ -250,3 +250,93 @@ async def test_basic_auth_unknown_user_runs_dummy_bcrypt_verify(
         "verify_password was never called for unknown user via Basic Auth — "
         "timing oracle leaks user existence"
     )
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting (P0-9 / spec 06)
+# ---------------------------------------------------------------------------
+
+
+async def _make_client_with_limit(
+    engine: AsyncEngine, settings: Settings
+) -> AsyncClient:
+    """Same factory as ``_make_client`` but exposes the configured limiter."""
+    from dbzap.auth.routes import create_auth_router
+
+    store = UserStore(engine=engine)
+    await store.initialize()
+    await store.seed_admin_user("admin", "s3cureP@ss")
+    router = create_auth_router(store=store, settings=settings)
+    app = FastAPI()
+    app.include_router(router)
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+
+async def test_login_rate_limit_blocks_after_threshold(engine: AsyncEngine) -> None:
+    """The (limit+1)-th request inside the window MUST get 429.
+
+    P0-9 / spec 06: without a limiter, an attacker can run bcrypt against
+    a single user at line speed (~10/s per worker). A short sliding
+    window cuts that to a manageable number of guesses.
+    """
+    settings = _settings(login_rate_limit_per_minute=3)
+    async with await _make_client_with_limit(engine, settings) as c:
+        for _ in range(3):
+            r = await c.post(
+                "/auth/login", json={"username": "admin", "password": "wrong"}
+            )
+            assert r.status_code == 401, r.text
+        r = await c.post(
+            "/auth/login", json={"username": "admin", "password": "wrong"}
+        )
+        assert r.status_code == 429, (
+            f"expected 429 after 3 attempts, got {r.status_code}: {r.text}"
+        )
+        assert "retry-after" in {k.lower() for k in r.headers}
+
+
+async def test_login_rate_limit_short_circuits_before_bcrypt(
+    engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 429 response MUST NOT pay the bcrypt cost — that is the
+    whole point of the limiter (spec 06).
+    """
+    import dbzap.auth.routes as routes_mod
+
+    call_count = {"verify": 0}
+    real_verify = routes_mod.verify_password
+
+    def counting_verify(plain: str, hashed: str) -> bool:
+        call_count["verify"] += 1
+        return real_verify(plain, hashed)
+
+    monkeypatch.setattr(routes_mod, "verify_password", counting_verify)
+
+    settings = _settings(login_rate_limit_per_minute=2)
+    async with await _make_client_with_limit(engine, settings) as c:
+        # First two pay bcrypt; the third is rate-limited.
+        await c.post("/auth/login", json={"username": "admin", "password": "wrong"})
+        await c.post("/auth/login", json={"username": "admin", "password": "wrong"})
+        before = call_count["verify"]
+
+        r = await c.post(
+            "/auth/login", json={"username": "admin", "password": "wrong"}
+        )
+        assert r.status_code == 429
+        # No new verify call between the two snapshots.
+        assert call_count["verify"] == before, (
+            "verify_password ran on the rate-limited path — limiter is not "
+            "short-circuiting before bcrypt"
+        )
+
+
+async def test_login_rate_limit_disabled_when_zero(engine: AsyncEngine) -> None:
+    """``LOGIN_RATE_LIMIT_PER_MINUTE=0`` disables the limiter entirely."""
+    settings = _settings(login_rate_limit_per_minute=0)
+    async with await _make_client_with_limit(engine, settings) as c:
+        # Far more than the default 10/min — must still all be 401, never 429.
+        for _ in range(20):
+            r = await c.post(
+                "/auth/login", json={"username": "admin", "password": "wrong"}
+            )
+            assert r.status_code == 401

@@ -1,14 +1,14 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import orjson
 import structlog
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from dbzap.auth.dependencies import make_get_current_user
@@ -32,6 +32,14 @@ _STATIC_DIR = Path(__file__).parent / "static"
 
 async def create_app(settings: Settings | None = None) -> FastAPI:
     cfg = settings or get_settings()
+
+    # P2-24: Warn on weak JWT secret at startup
+    if len(cfg.jwt_secret_key) < 32:
+        logger.warning(
+            "jwt_secret_key_weak",
+            length=len(cfg.jwt_secret_key),
+            hint="Use at least 32 characters for production security",
+        )
 
     engine = build_engine(cfg)
 
@@ -57,7 +65,11 @@ async def create_app(settings: Settings | None = None) -> FastAPI:
         yield
         await engine.dispose()
 
-    app = FastAPI(lifespan=lifespan)
+    app = FastAPI(
+        lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+    )
 
     # PerformanceMiddleware must come before GZip to measure uncompressed time
     app.add_middleware(PerformanceMiddleware, collector=collector)
@@ -88,7 +100,6 @@ async def create_app(settings: Settings | None = None) -> FastAPI:
     health = HealthCheck(
         engine=engine,
         introspector=introspector,
-        start_time=datetime.now(UTC),
     )
     health_router = create_health_router(
         health=health,
@@ -130,7 +141,13 @@ async def create_app(settings: Settings | None = None) -> FastAPI:
 
         @app.get("/explorer/config", include_in_schema=False)
         async def explorer_config() -> dict[str, str | None]:
-            return {"username": cfg.explorer_username, "password": cfg.explorer_password}
+            # SECURITY: this endpoint is anonymously reachable (see specs/06-auth.md
+            # public endpoints + specs/08-api-explorer-frontend.md). Returning
+            # EXPLORER_PASSWORD here would leak the admin credential to every
+            # visitor — and to any cache or proxy in front of dbzap. Only the
+            # username is safe to pre-fill; the password input is left blank
+            # and the user must type it on every login.
+            return {"username": cfg.explorer_username}
 
     # Protect /openapi.json behind authentication
     original_openapi = app.openapi
@@ -140,7 +157,10 @@ async def create_app(settings: Settings | None = None) -> FastAPI:
     ]
 
     @app.get("/openapi.json", include_in_schema=False)
-    async def openapi_with_auth(user: UserRecord = Depends(get_current_user)) -> JSONResponse:
-        return JSONResponse(original_openapi())
+    async def openapi_with_auth(user: UserRecord = Depends(get_current_user)) -> Response:
+        return Response(
+            content=orjson.dumps(original_openapi()),
+            media_type="application/json",
+        )
 
     return app

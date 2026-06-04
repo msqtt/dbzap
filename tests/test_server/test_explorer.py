@@ -113,7 +113,11 @@ async def test_config_defaults_null(client: AsyncClient) -> None:
     resp = await client.get("/explorer/config")
     assert resp.status_code == 200
     data = resp.json()
-    assert data == {"username": None, "password": None}
+    # Password MUST NOT appear in the response, even as null. Spec 08 / P0-1:
+    # /explorer/config is anonymously reachable, so echoing the configured
+    # password back would leak the admin credential.
+    assert "password" not in data
+    assert data == {"username": None}
 
 
 async def test_config_returns_configured_values() -> None:
@@ -128,7 +132,36 @@ async def test_config_returns_configured_values() -> None:
         resp = await c.get("/explorer/config")
         assert resp.status_code == 200
         data = resp.json()
-        assert data == {"username": "admin", "password": "secret"}
+        # Username may be exposed for UI pre-fill; password MUST NOT.
+        assert data == {"username": "admin"}
+        assert "password" not in data
+
+
+async def test_config_never_leaks_password_anonymous() -> None:
+    """P0-1 regression: an unauthenticated GET MUST NOT receive the plaintext password.
+
+    Spec 08 — /explorer/config is a public endpoint (no auth). It is intentionally
+    anonymous so the SPA can pre-fill the username. Returning ``EXPLORER_PASSWORD``
+    here exposes the admin credential to anyone who can reach the host (intermediate
+    caches, network sniffers, browser history). The endpoint MUST drop the password
+    field from its response shape entirely.
+    """
+    app = await create_app(
+        settings=_settings(
+            enable_explorer=True,
+            explorer_username="admin",
+            explorer_password="this-must-not-leak",
+        )
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        resp = await c.get("/explorer/config")
+    assert resp.status_code == 200
+    body_text = resp.text
+    assert "this-must-not-leak" not in body_text, (
+        "EXPLORER_PASSWORD plaintext leaked through /explorer/config — "
+        "any anonymous visitor can scrape the admin credential"
+    )
+    assert "password" not in resp.json()
 
 
 async def test_config_disabled_returns_404(client_disabled: AsyncClient) -> None:

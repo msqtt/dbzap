@@ -175,6 +175,66 @@ class TestCreate:
         # Must succeed (id is server-generated via SERIAL/AUTOINCREMENT)
         assert resp.status_code == 201
 
+    async def test_explicit_null_preserved_as_sql_null(self, client: AsyncClient) -> None:
+        """P0-2 / spec 04: ``{"col": null}`` MUST land in the row as SQL NULL,
+        even when the column has a SQL DEFAULT.
+
+        Before the fix the handler dropped any None from the body before
+        ``insert.values(...)``. For ``users.score`` (``REAL DEFAULT 0.0``)
+        that meant a client explicitly asking for ``score: null`` got back
+        ``score: 0.0`` because the DEFAULT fired. After the fix, the
+        validated pydantic model is dumped with ``exclude_unset=True`` so
+        explicit None survives as SQL NULL, but truly unset fields still
+        let the server default apply (covered by
+        ``test_unset_field_still_takes_default``).
+        """
+        resp = await client.post(
+            "/api/users",
+            json={
+                "name": "NullScore",
+                "email": "nullscore@example.com",
+                "score": None,
+            },
+        )
+        assert resp.status_code == 201
+        row = resp.json()
+        assert row["name"] == "NullScore"
+        # Explicit null in body MUST NOT be silently replaced by the
+        # column default (0.0). It must round-trip as JSON null.
+        assert row["score"] is None, (
+            f"Explicit `score: null` was silently dropped — got {row['score']!r}; "
+            "server applied DEFAULT 0.0 and ignored the client's intent"
+        )
+
+    async def test_unset_field_still_takes_default(self, client: AsyncClient) -> None:
+        """Companion of the explicit-null test: omitting an optional field
+        still lets its SQL default fire. ``score`` defaults to 0.0 in users.
+        """
+        resp = await client.post(
+            "/api/users",
+            json={"name": "DefaultScore", "email": "ds@example.com"},
+        )
+        assert resp.status_code == 201
+        # No score sent: server default 0.0 should apply.
+        body = resp.json()
+        assert body["score"] == 0.0
+
+    async def test_create_does_not_swallow_non_validation_errors_as_422(
+        self, client: AsyncClient
+    ) -> None:
+        """P0-2: bare ``except Exception`` previously masked every error as 422,
+        including SQLAlchemy IntegrityError. The duplicate-unique path MUST
+        return 409 (handled by IntegrityError branch) — NOT 422.
+        """
+        payload = {"name": "ConflictGuy", "email": "conflict@example.com"}
+        first = await client.post("/api/users", json=payload)
+        assert first.status_code == 201
+        second = await client.post("/api/users", json=payload)
+        # If a `bare except Exception → 422` path exists, the IntegrityError
+        # is no longer reachable and 409 never fires.
+        assert second.status_code == 409
+        assert second.status_code != 422
+
 
 # ---------------------------------------------------------------------------
 # LIST  GET /api/users
@@ -242,6 +302,11 @@ class TestList:
         assert pg["total_records"] == 5
         assert pg["total_pages"] == 3
 
+    async def test_list_invalid_page_returns_422(self, client: AsyncClient) -> None:
+        """P0-7: non-integer pagination params must return 422, not 500."""
+        resp = await client.get("/api/users?page=abc")
+        assert resp.status_code == 422
+
 
 # ---------------------------------------------------------------------------
 # GET by PK  GET /api/users/{pk}
@@ -303,6 +368,41 @@ class TestFullUpdate:
         )
         assert resp.status_code == 404
 
+    async def test_put_wrong_type_returns_422(self, client: AsyncClient) -> None:
+        """P0-3 / spec 04: PUT MUST validate the body via the Update pydantic
+        model. Sending a string where an integer is expected (``score`` is
+        REAL) used to leak SQLAlchemy compile errors as a 500. After the
+        fix it is a clean 422 — the same shape POST already returns.
+        """
+        created = (
+            await client.post("/api/users", json={"name": "TypeTest", "email": "tt@x.com"})
+        ).json()
+        resp = await client.put(
+            f"/api/users/{created['id']}",
+            json={
+                "name": "TypeTest",
+                "email": "tt@x.com",
+                "score": "not-a-number",
+            },
+        )
+        assert resp.status_code == 422, (
+            f"Expected 422 for type mismatch, got {resp.status_code}: {resp.text}"
+        )
+
+    async def test_put_preserves_explicit_null(self, client: AsyncClient) -> None:
+        """PUT with explicit null on a column with a default must round-trip null."""
+        created = (
+            await client.post("/api/users", json={"name": "PutNull", "email": "pn@x.com", "score": 50.0})
+        ).json()
+        resp = await client.put(
+            f"/api/users/{created['id']}",
+            json={"name": "PutNull", "email": "pn@x.com", "score": None},
+        )
+        assert resp.status_code == 200
+        # Re-read to confirm persistence.
+        fetched = (await client.get(f"/api/users/{created['id']}")).json()
+        assert fetched["score"] is None
+
 
 # ---------------------------------------------------------------------------
 # PARTIAL UPDATE  PATCH /api/users/{pk}
@@ -331,6 +431,37 @@ class TestPartialUpdate:
     async def test_patch_nonexistent_returns_404(self, client: AsyncClient) -> None:
         resp = await client.patch("/api/users/99999", json={"name": "Nobody"})
         assert resp.status_code == 404
+
+    async def test_patch_wrong_type_returns_422(self, client: AsyncClient) -> None:
+        """P0-3 / spec 04: PATCH MUST validate via the Update model.
+
+        Same rationale as the PUT test — type mismatches must surface as
+        a clean 422 from pydantic, not as a 500 from SQLAlchemy.
+        """
+        created = (
+            await client.post("/api/users", json={"name": "P", "email": "p@x.com"})
+        ).json()
+        resp = await client.patch(
+            f"/api/users/{created['id']}", json={"score": "not-a-number"}
+        )
+        assert resp.status_code == 422, (
+            f"Expected 422 for type mismatch, got {resp.status_code}: {resp.text}"
+        )
+
+    async def test_patch_preserves_explicit_null(self, client: AsyncClient) -> None:
+        """PATCH with explicit null clears a previously-set column."""
+        created = (
+            await client.post(
+                "/api/users",
+                json={"name": "PatchNull", "email": "pnn@x.com", "score": 80.0},
+            )
+        ).json()
+        resp = await client.patch(
+            f"/api/users/{created['id']}", json={"score": None}
+        )
+        assert resp.status_code == 200
+        fetched = (await client.get(f"/api/users/{created['id']}")).json()
+        assert fetched["score"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -465,6 +596,19 @@ class TestFiltering:
         data = resp.json()["data"]
         assert len(data) == 1
         assert data[0]["name"] == "Alice"
+
+    async def test_like_filter_escapes_wildcards(self, client: AsyncClient) -> None:
+        """P0-2: % and _ in user input must be escaped — not treated as SQL wildcards."""
+        await self._seed(client)
+        # Searching for literal '%' should not match everything
+        resp = await client.get("/api/users?name[like]=%25")
+        data = resp.json()["data"]
+        assert len(data) == 0  # no name contains a literal '%'
+
+        # Searching for literal '_' should not match single-char wildcard
+        resp = await client.get("/api/users?name[like]=_lice")
+        data = resp.json()["data"]
+        assert len(data) == 0  # '_lice' as literal doesn't match 'Alice'
 
     async def test_in_filter(self, client: AsyncClient) -> None:
         await self._seed(client)

@@ -90,6 +90,9 @@ All settings via environment variables (or `.env` file):
 | `DB_POOL_TIMEOUT` | `30` | Seconds to wait for a connection from the pool |
 | `DB_POOL_RECYCLE` | `1800` | Max connection lifetime in seconds |
 | `DB_STATEMENT_TIMEOUT` | `5s` | Database statement timeout (e.g. `5s`, `30s`) |
+| `CORS_ORIGINS` | `["*"]` | Allowed CORS origins (JSON list or comma-separated) |
+| `CORS_ALLOW_CREDENTIALS` | `false` | Allow credentials in CORS requests (incompatible with wildcard origin) |
+| `LOGIN_RATE_LIMIT_PER_MINUTE` | `10` | Max login attempts per IP per minute. `0` disables |
 
 ## Development
 

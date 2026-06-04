@@ -1,6 +1,9 @@
 """Tests for GraphQL API generator (spec: 05-graphql-api-generator.md, 09-graphql-relay-filtering.md)."""
 from __future__ import annotations
 
+import datetime
+import decimal
+import uuid
 from collections.abc import AsyncGenerator
 
 import pytest
@@ -61,6 +64,16 @@ def _build_schema(conn: Connection) -> None:
                 item_id  INTEGER NOT NULL,
                 qty      INTEGER NOT NULL DEFAULT 1,
                 PRIMARY KEY (order_id, item_id)
+            )
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE TABLE tags (
+                slug TEXT PRIMARY KEY,
+                label TEXT NOT NULL
             )
             """
         )
@@ -393,6 +406,49 @@ class TestCreateMutation:
         )
         assert result.get("errors") is not None
 
+    async def test_create_duplicate_unique_returns_conflict_extension(
+        self, client: AsyncClient
+    ) -> None:
+        """P0-4 / spec 05: a unique-constraint violation MUST surface as a
+        ``GraphQLError`` with ``extensions.code = "CONFLICT"`` and the
+        original message — NOT as a generic "Internal server error".
+
+        Before the fix, ``_create_resolver`` re-raised ``IntegrityError`` as
+        a bare ``Exception("Unique constraint violated")``. Strawberry's
+        default masking turned that into ``Internal server error`` with no
+        ``extensions.code``, so clients had no way to detect the conflict
+        without parsing free-form text.
+        """
+        await _gql(
+            client,
+            'mutation { createUsers(input: { name: "Conflict1", email: "c@x.com" }) { id } }',
+        )
+        result = await _gql(
+            client,
+            'mutation { createUsers(input: { name: "Conflict2", email: "c@x.com" }) { id } }',
+        )
+        errors = result.get("errors") or []
+        assert errors, "expected GraphQL errors on duplicate unique"
+        first = errors[0]
+        assert first.get("message") == "Unique constraint violated", (
+            f"expected actionable error message, got {first.get('message')!r}"
+        )
+        ext = first.get("extensions") or {}
+        assert ext.get("code") == "CONFLICT", (
+            f"expected extensions.code='CONFLICT', got {ext!r}. "
+            "Bare Exception masking lost the error code."
+        )
+
+    async def test_create_explicit_null_writes_null(self, client: AsyncClient) -> None:
+        """P0-5: explicit null in create must write SQL NULL, not let the DEFAULT fire."""
+        # users.score has DEFAULT 0.0. Sending score=null must write NULL, not 0.0.
+        result = await _gql(
+            client,
+            'mutation { createUsers(input: { name: "ScoreNull", email: "sn@x.com", score: null }) { id score } }',
+        )
+        assert result.get("errors") is None
+        assert result["data"]["createUsers"]["score"] is None
+
 
 # ---------------------------------------------------------------------------
 # Mutation – update
@@ -441,6 +497,31 @@ class TestUpdateMutation:
         )
         assert result.get("errors") is None
         assert result["data"]["updateUsers"] is None
+
+    async def test_update_set_field_to_null(self, client: AsyncClient) -> None:
+        """P0-3: update with explicit null must write SQL NULL, not skip the field."""
+        # Create a post with a body, then null it out
+        # First need a user for the FK
+        user = (
+            await _gql(
+                client,
+                'mutation { createUsers(input: { name: "NullTest", email: "nt@x.com" }) { id } }',
+            )
+        )["data"]["createUsers"]
+        created = (
+            await _gql(
+                client,
+                f'mutation {{ createPosts(input: {{ userId: {user["id"]}, title: "T", body: "original" }}) {{ id body }} }}',
+            )
+        )["data"]["createPosts"]
+        assert created["body"] == "original"
+        # Set body to null
+        result = await _gql(
+            client,
+            f'mutation {{ updatePosts(id: {created["id"]}, input: {{ body: null }}) {{ id body }} }}',
+        )
+        assert result.get("errors") is None
+        assert result["data"]["updatePosts"]["body"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -540,3 +621,89 @@ class TestCompositePkTable:
         )
         assert result.get("errors") is None
         assert result["data"]["orderItemsById"] is not None
+
+
+# ---------------------------------------------------------------------------
+# Cursor encoding (P0-5 / spec 05): non-JSON-native PK types must not crash.
+# ---------------------------------------------------------------------------
+
+
+class TestStringPkTable:
+    """P0-9: tables with non-int PK must use the correct argument type in GraphQL."""
+
+    async def test_create_and_byid_with_string_pk(self, client: AsyncClient) -> None:
+        result = await _gql(
+            client,
+            'mutation { createTags(input: { slug: "python", label: "Python" }) { slug label } }',
+        )
+        assert result.get("errors") is None
+        assert result["data"]["createTags"]["slug"] == "python"
+
+        # Query by string PK
+        result = await _gql(
+            client,
+            '{ tagsById(id: "python") { slug label } }',
+        )
+        assert result.get("errors") is None
+        assert result["data"]["tagsById"]["label"] == "Python"
+
+
+# ---------------------------------------------------------------------------
+
+
+class TestCursorEncoding:
+    """The encoder is opaque to clients — only round-trip stability matters.
+
+    Before the fix, ``json.dumps({'id': datetime.now()})`` raised
+    ``TypeError: Object of type datetime is not JSON serializable`` and any
+    list query on a table keyed on ``datetime`` / ``UUID`` / ``Decimal``
+    crashed with 500.
+    """
+
+    def test_encode_datetime_pk(self) -> None:
+        from dbzap.generators.graphql import _decode_cursor, _encode_cursor
+
+        ts = datetime.datetime(2026, 1, 2, 3, 4, 5, tzinfo=datetime.UTC)
+        token = _encode_cursor({"id": ts})
+        assert isinstance(token, str)
+        # Round-trip — decoded value is a string (cursors are opaque).
+        decoded = _decode_cursor(token)
+        assert "id" in decoded
+        assert ts.isoformat() in str(decoded["id"])
+
+    def test_encode_uuid_pk(self) -> None:
+        from dbzap.generators.graphql import _decode_cursor, _encode_cursor
+
+        u = uuid.UUID("12345678-1234-5678-1234-567812345678")
+        token = _encode_cursor({"id": u})
+        decoded = _decode_cursor(token)
+        assert str(u) == decoded["id"]
+
+    def test_encode_decimal_pk(self) -> None:
+        from dbzap.generators.graphql import _decode_cursor, _encode_cursor
+
+        d = decimal.Decimal("12345.6789")
+        token = _encode_cursor({"id": d})
+        decoded = _decode_cursor(token)
+        assert str(d) == decoded["id"]
+
+    def test_encode_date_pk(self) -> None:
+        from dbzap.generators.graphql import _decode_cursor, _encode_cursor
+
+        token = _encode_cursor({"id": datetime.date(2026, 6, 4)})
+        decoded = _decode_cursor(token)
+        assert "2026-06-04" in str(decoded["id"])
+
+    def test_encode_bytes_pk(self) -> None:
+        from dbzap.generators.graphql import _encode_cursor
+
+        # Just must not raise — bytes aren't JSON-native.
+        _encode_cursor({"id": b"\x00\x01\x02"})
+
+    def test_encode_int_pk_unchanged(self) -> None:
+        """Existing int-PK behavior must keep working."""
+        from dbzap.generators.graphql import _decode_cursor, _encode_cursor
+
+        token = _encode_cursor({"id": 42})
+        decoded = _decode_cursor(token)
+        assert decoded["id"] == 42

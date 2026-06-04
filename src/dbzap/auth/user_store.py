@@ -35,13 +35,41 @@ class UserStore:
             await conn.run_sync(_METADATA.create_all)
 
     async def seed_admin_user(self, username: str, password: str) -> None:
+        """Create or update the admin user, race-safe under multi-worker startup.
+
+        ``uvicorn --workers N`` launches N processes that each call this
+        method on the same database. The naive sequence (lookup → branch
+        on None → insert) has a window where two workers both miss and
+        both insert; one wins and the other gets ``IntegrityError``.
+
+        Pattern: try the insert first; on ``IntegrityError`` recover by
+        re-reading the now-existing row and proceeding to the
+        "user exists" branch (update hash if it no longer matches the
+        configured password). See P0-7 / specs/06-auth.md.
+        """
+        from sqlalchemy.exc import IntegrityError
+
         from dbzap.auth.passwords import hash_password, verify_password
 
         pw_hash = hash_password(password)
+
         existing = await self.get_by_username(username)
         if existing is None:
-            await self.create_user(username, pw_hash)
-        elif not verify_password(password, existing.password_hash):
+            try:
+                await self.create_user(username, pw_hash)
+                return
+            except IntegrityError:
+                # A peer worker won the insert race. Fall through to the
+                # "exists" branch using the freshly-readable row.
+                existing = await self.get_by_username(username)
+                if existing is None:
+                    # Truly unexpected: insert claims to conflict but read
+                    # finds nothing. Re-raise the original error indirectly
+                    # by attempting one more insert so the caller sees a
+                    # real failure rather than silent success.
+                    raise
+
+        if not verify_password(password, existing.password_hash):
             stmt = (
                 update(_users_table)
                 .where(_users_table.c.username == username)

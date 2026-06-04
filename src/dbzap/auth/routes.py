@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
 from dbzap.auth.dependencies import make_get_current_user
 from dbzap.auth.models import UserRecord
 from dbzap.auth.passwords import get_dummy_hash, verify_password
+from dbzap.auth.rate_limit import SlidingWindowLimiter
 from dbzap.auth.tokens import create_access_token
 from dbzap.auth.user_store import UserStore
 from dbzap.core.config import Settings
@@ -25,14 +26,41 @@ class MeResponse(BaseModel):
     username: str
 
 
-def create_auth_router(*, store: UserStore, settings: Settings) -> APIRouter:
+def create_auth_router(
+    *,
+    store: UserStore,
+    settings: Settings,
+    login_limiter: SlidingWindowLimiter | None = None,
+) -> APIRouter:
     router = APIRouter(prefix="/auth")
     get_current_user = make_get_current_user(store=store, settings=settings)
+
+    # P0-9 / spec 06: per-IP brute-force protection on /auth/login.
+    # ``login_limiter`` is injectable so tests can use a fast clock and
+    # production can swap in a Redis-backed implementation later.
+    if login_limiter is None:
+        login_limiter = SlidingWindowLimiter(
+            max_calls=settings.login_rate_limit_per_minute,
+            window_seconds=60.0,
+        )
 
     if settings.auth_mode in ("jwt", "both"):
 
         @router.post("/login", response_model=TokenResponse)
-        async def login(body: LoginRequest) -> TokenResponse:
+        async def login(body: LoginRequest, request: Request) -> TokenResponse:
+            # Limiter MUST run BEFORE verify_password — otherwise the bcrypt
+            # cost the limiter is meant to protect is paid on every call.
+            client = request.client
+            ip = client.host if client is not None else "unknown"
+            allowed, retry_after = login_limiter.check(ip)
+            if not allowed:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Too many login attempts",
+                    # Round up so Retry-After is never less than 1 second.
+                    headers={"Retry-After": str(max(1, int(retry_after) + 1))},
+                )
+
             _invalid = HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid credentials",

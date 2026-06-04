@@ -101,6 +101,12 @@ No new tables. Operates on introspected tables using SQLAlchemy Core (async).
 - `JSON`/`JSONB` columns: map to `str` (JSON-serialized) in GraphQL, since Strawberry doesn't have a built-in JSON scalar by default. Register `scalars.JSON` if available.
 - **Generator isolation**: each call to `generate(...)` MUST produce a fully independent set of GraphQL types. The generator MUST NOT register the dynamically-created classes into `sys.modules[__name__].__dict__` or any other process-wide namespace, because doing so causes successive calls (different table sets, multiple test fixtures, multi-tenant setups) to bleed into each other and silently overwrite types with the same name. Resolver bodies that need type lookup must close over a per-call namespace dict instead.
 - **Cursor encoding**: cursors carry the row's primary-key values base64-encoded. The encoder MUST handle non-JSON-native PK types (`datetime`, `date`, `UUID`, `Decimal`, `bytes`) by stringifying them; otherwise tables keyed on those types crash on every list query.
+- **Mutation error mapping**: domain errors raised by mutations MUST surface as `strawberry.exceptions.GraphQLError` (or a subclass) with a stable `extensions.code` so clients can branch on them. The original `_create_resolver` re-raised SQLAlchemy `IntegrityError` as a bare Python `Exception("Unique constraint violated")`. Strawberry treats bare exceptions as "Internal server error" — clients see `{"errors":[{"message":"Internal server error"}]}` with no error code, and the failing field name is lost in the stack trace. The fix:
+  - Catch `IntegrityError` and raise `GraphQLError("Unique constraint violated", extensions={"code": "CONFLICT"})`.
+  - The same pattern applies to any future mutation that maps a DB-level constraint violation to a 4xx-equivalent GraphQL error (foreign-key violation → `extensions.code = "FK_VIOLATION"`, etc.).
+  - Internal/unexpected errors (connection failure, programmer bugs) MUST stay as plain exceptions so Strawberry's standard masking still applies — they should NOT be relabeled as `CONFLICT`.
+- **Explicit null in update mutations**: The update resolver MUST distinguish between "field not provided" (client doesn't want to change it) and "field explicitly set to null" (client wants to clear it). Using `if v is None: continue` conflates the two: a client sending `{"name": null}` intending to clear the column is silently ignored. The fix: use `strawberry.UNSET` as the default for update input fields; skip only `UNSET` values, pass `None` through to the SQL UPDATE as NULL.
+- **Explicit null in create mutations**: The same UNSET/None distinction applies to create inputs for nullable/defaulted columns. `strawberry.UNSET` means "omit from INSERT, let the SQL default fire". Explicit `null` means "write SQL NULL regardless of column default".
 
 ## Acceptance Criteria
 - [ ] GraphQL type generated for each table with all columns as fields.
@@ -113,6 +119,7 @@ No new tables. Operates on introspected tables using SQLAlchemy Core (async).
 - [ ] GraphiQL playground is available at `/graphql` in debug mode.
 - [ ] All SQL queries use parameterized statements.
 - [ ] Empty database produces a valid (non-crashing) schema.
+- [ ] `createUsers`-style mutations that fail a unique constraint return a `GraphQLError` with `extensions.code = "CONFLICT"` and the original message — NOT a generic "Internal server error".
 
 ## Module Location
 `src/dbzap/generators/graphql.py`

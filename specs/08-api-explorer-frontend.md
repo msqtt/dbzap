@@ -36,14 +36,26 @@ Always public (no auth). Returns JSON:
 
 ```json
 {
-  "username": "admin",
-  "password": "secret"
+  "username": "admin"
 }
 ```
 
-Both fields are `null` when not configured. The frontend pre-fills the login form with these values (password field is pre-filled but still masked). If both are `null`, the form is empty as before.
+The endpoint MUST NOT return the configured password. Even though the
+explorer UI is itself public, the response body of `/explorer/config`
+is also public — anyone able to reach the explorer page can request it
+anonymously. Returning `EXPLORER_PASSWORD` therefore exposes the admin
+credential to every visitor and to any cached intermediary. Only the
+username is safe to pre-fill; the password input is left empty and the
+user types it on every login.
 
-Config source: `EXPLORER_USERNAME` and `EXPLORER_PASSWORD` environment variables (or `.env` file).
+`username` is `null` when `EXPLORER_USERNAME` is not configured. The
+`password` key MUST NOT appear in the response (neither as `null` nor
+with a value), so that an accidental future re-introduction is caught
+by the schema test.
+
+Config source: `EXPLORER_USERNAME` environment variable (or `.env`
+file). `EXPLORER_PASSWORD` is consumed only by the server for seeding
+and Basic Auth — never exposed via HTTP.
 
 ### Top Navigation Bar
 - Two tabs: **API Explorer** | **Dashboard**
@@ -55,7 +67,7 @@ Config source: `EXPLORER_USERNAME` and `EXPLORER_PASSWORD` environment variables
 
 #### 1. Login Panel
 - Username + password form
-- On page load, fetch `GET /explorer/config`; if `username` and/or `password` are non-null, pre-fill the corresponding input fields (password is masked)
+- On page load, fetch `GET /explorer/config`; if `username` is non-null, pre-fill the username input. The password input is always left empty — `/explorer/config` does not return the password and the user types it on every login.
 - Calls `POST /auth/login`, stores `access_token` in `sessionStorage`
 - Shows token expiry countdown
 
@@ -191,8 +203,9 @@ src/dbzap/server/static/
 - Histogram p95 estimation: use linear interpolation between bucket boundaries; if all requests fall in one bucket, display that bucket's upper bound.
 - Rapid polling with slow `/metrics` response: if a poll hasn't returned before the next interval fires, skip the new poll (no request stacking).
 - Clicking endpoint row in dashboard switches to Explorer tab: if Explorer is in a different scroll position, scroll to top.
-- `EXPLORER_USERNAME` / `EXPLORER_PASSWORD` not set: `/explorer/config` returns `{"username": null, "password": null}`; login form is empty, user must type credentials.
+- `EXPLORER_USERNAME` / `EXPLORER_PASSWORD` not set: `/explorer/config` returns `{"username": null}`; login form is empty, user must type credentials.
 - `/explorer/config` fetch fails (network error): silently ignore, leave login form empty.
+- `EXPLORER_PASSWORD` set: server stores its hash for seeding/Basic Auth, but `/explorer/config` MUST NOT echo it back. There is intentionally no convenience path that exposes the plaintext password to the client.
 - Theme preference `system`: uses `window.matchMedia('(prefers-color-scheme: dark)')` to determine effective theme; updates automatically if system preference changes while page is open.
 - Theme preference stored in `localStorage` survives page reload but not across different browser profiles.
 
@@ -238,9 +251,9 @@ src/dbzap/server/static/
 - [ ] Failed `/metrics` fetch shows "Metrics unavailable" banner without crashing the page.
 - [ ] Empty metrics (fresh start) shows "No data yet" placeholders gracefully.
 - [ ] No external CDN dependencies - all assets are self-contained.
-- [ ] `GET /explorer/config` returns `{"username": ..., "password": ...}` (values or null).
-- [ ] Login form pre-fills username and password when `EXPLORER_USERNAME` / `EXPLORER_PASSWORD` are set.
-- [ ] Pre-filled password is masked (type="password").
+- [ ] `GET /explorer/config` returns `{"username": ...}` (value or null). It MUST NOT include a `password` key.
+- [ ] Login form pre-fills username when `EXPLORER_USERNAME` is set; the password input is always left empty.
+- [ ] `/explorer/config` response is the same shape regardless of whether `EXPLORER_PASSWORD` is set (no password echoed back).
 - [ ] `/explorer/config` fetch failure is silently ignored; login form remains functional.
 - [ ] Theme toggle button in nav bar cycles: system → light → dark → system.
 - [ ] Theme choice is persisted in `localStorage` under key `dbzap-theme`.

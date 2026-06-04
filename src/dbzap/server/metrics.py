@@ -74,93 +74,108 @@ class MetricsCollector:
             self._pool_overflow = overflow
 
     def export_prometheus(self) -> str:
+        # P1-15: snapshot all state under the lock, then release it before
+        # building the (potentially large) text output. This avoids holding
+        # the lock for the duration of string concatenation.
         with self._lock:
-            lines: list[str] = []
+            request_counts = dict(self._request_counts)
+            duration_sum = dict(self._duration_sum)
+            duration_count = dict(self._duration_count)
+            duration_buckets = dict(self._duration_buckets)
+            db_sum = dict(self._db_sum)
+            db_count = dict(self._db_count)
+            db_buckets = dict(self._db_buckets)
+            in_progress = self._in_progress
+            pool_size = self._pool_size
+            pool_checked_out = self._pool_checked_out
+            pool_overflow = self._pool_overflow
 
-            # http_requests_total
-            lines += [
-                "# HELP http_requests_total Total number of HTTP requests",
-                "# TYPE http_requests_total counter",
-            ]
-            for (method, path, status), count in sorted(self._request_counts.items()):
-                lines.append(
-                    f'http_requests_total{{method="{method}",path="{path}",status="{status}"}} {count}'
-                )
+        lines: list[str] = []
 
-            # http_request_duration_seconds
-            lines += [
-                "",
-                "# HELP http_request_duration_seconds HTTP request duration in seconds",
-                "# TYPE http_request_duration_seconds histogram",
-            ]
-            seen_hkeys: set[tuple[str, str]] = set()
-            for (method, path, le), cnt in sorted(
-                self._duration_buckets.items(), key=lambda x: (x[0][0], x[0][1], x[0][2])
-            ):
-                le_str = "+Inf" if math.isinf(le) else str(le)
-                lines.append(
-                    f'http_request_duration_seconds_bucket{{method="{method}",path="{path}",le="{le_str}"}} {cnt}'
-                )
-                seen_hkeys.add((method, path))
-            for hkey in sorted(seen_hkeys):
-                method, path = hkey
-                lines.append(
-                    f'http_request_duration_seconds_count{{method="{method}",path="{path}"}} {self._duration_count[hkey]}'
-                )
-                lines.append(
-                    f'http_request_duration_seconds_sum{{method="{method}",path="{path}"}} {round(self._duration_sum[hkey], 6)}'
-                )
+        # http_requests_total
+        lines += [
+            "# HELP http_requests_total Total number of HTTP requests",
+            "# TYPE http_requests_total counter",
+        ]
+        for (method, path, status), count in sorted(request_counts.items()):
+            lines.append(
+                f'http_requests_total{{method="{method}",path="{path}",status="{status}"}} {count}'
+            )
 
-            # http_requests_in_progress
-            lines += [
-                "",
-                "# HELP http_requests_in_progress Number of requests currently being processed",
-                "# TYPE http_requests_in_progress gauge",
-                f"http_requests_in_progress {self._in_progress}",
-            ]
+        # http_request_duration_seconds
+        lines += [
+            "",
+            "# HELP http_request_duration_seconds HTTP request duration in seconds",
+            "# TYPE http_request_duration_seconds histogram",
+        ]
+        seen_hkeys: set[tuple[str, str]] = set()
+        for (method, path, le), cnt in sorted(
+            duration_buckets.items(), key=lambda x: (x[0][0], x[0][1], x[0][2])
+        ):
+            le_str = "+Inf" if math.isinf(le) else str(le)
+            lines.append(
+                f'http_request_duration_seconds_bucket{{method="{method}",path="{path}",le="{le_str}"}} {cnt}'
+            )
+            seen_hkeys.add((method, path))
+        for hkey in sorted(seen_hkeys):
+            method, path = hkey
+            lines.append(
+                f'http_request_duration_seconds_count{{method="{method}",path="{path}"}} {duration_count[hkey]}'
+            )
+            lines.append(
+                f'http_request_duration_seconds_sum{{method="{method}",path="{path}"}} {round(duration_sum[hkey], 6)}'
+            )
 
-            # db_pool_*
-            lines += [
-                "",
-                "# HELP db_pool_size Database connection pool size",
-                "# TYPE db_pool_size gauge",
-                f"db_pool_size {self._pool_size}",
-                "",
-                "# HELP db_pool_checked_out Number of connections currently checked out from pool",
-                "# TYPE db_pool_checked_out gauge",
-                f"db_pool_checked_out {self._pool_checked_out}",
-                "",
-                "# HELP db_pool_overflow Number of overflow connections",
-                "# TYPE db_pool_overflow gauge",
-                f"db_pool_overflow {self._pool_overflow}",
-            ]
+        # http_requests_in_progress
+        lines += [
+            "",
+            "# HELP http_requests_in_progress Number of requests currently being processed",
+            "# TYPE http_requests_in_progress gauge",
+            f"http_requests_in_progress {in_progress}",
+        ]
 
-            # db_query_duration_seconds
-            lines += [
-                "",
-                "# HELP db_query_duration_seconds Database query duration in seconds",
-                "# TYPE db_query_duration_seconds histogram",
-            ]
-            seen_db_keys: set[tuple[str, str]] = set()
-            for (table, operation, le), cnt in sorted(
-                self._db_buckets.items(), key=lambda x: (x[0][0], x[0][1], x[0][2])
-            ):
-                le_str = "+Inf" if math.isinf(le) else str(le)
-                lines.append(
-                    f'db_query_duration_seconds_bucket{{table="{table}",operation="{operation}",le="{le_str}"}} {cnt}'
-                )
-                seen_db_keys.add((table, operation))
-            for dkey in sorted(seen_db_keys):
-                table, operation = dkey
-                lines.append(
-                    f'db_query_duration_seconds_count{{table="{table}",operation="{operation}"}} {self._db_count[dkey]}'
-                )
-                lines.append(
-                    f'db_query_duration_seconds_sum{{table="{table}",operation="{operation}"}} {round(self._db_sum[dkey], 6)}'
-                )
+        # db_pool_*
+        lines += [
+            "",
+            "# HELP db_pool_size Database connection pool size",
+            "# TYPE db_pool_size gauge",
+            f"db_pool_size {pool_size}",
+            "",
+            "# HELP db_pool_checked_out Number of connections currently checked out from pool",
+            "# TYPE db_pool_checked_out gauge",
+            f"db_pool_checked_out {pool_checked_out}",
+            "",
+            "# HELP db_pool_overflow Number of overflow connections",
+            "# TYPE db_pool_overflow gauge",
+            f"db_pool_overflow {pool_overflow}",
+        ]
 
-            lines.append("")
-            return "\n".join(lines)
+        # db_query_duration_seconds
+        lines += [
+            "",
+            "# HELP db_query_duration_seconds Database query duration in seconds",
+            "# TYPE db_query_duration_seconds histogram",
+        ]
+        seen_db_keys: set[tuple[str, str]] = set()
+        for (table, operation, le), cnt in sorted(
+            db_buckets.items(), key=lambda x: (x[0][0], x[0][1], x[0][2])
+        ):
+            le_str = "+Inf" if math.isinf(le) else str(le)
+            lines.append(
+                f'db_query_duration_seconds_bucket{{table="{table}",operation="{operation}",le="{le_str}"}} {cnt}'
+            )
+            seen_db_keys.add((table, operation))
+        for dkey in sorted(seen_db_keys):
+            table, operation = dkey
+            lines.append(
+                f'db_query_duration_seconds_count{{table="{table}",operation="{operation}"}} {db_count[dkey]}'
+            )
+            lines.append(
+                f'db_query_duration_seconds_sum{{table="{table}",operation="{operation}"}} {round(db_sum[dkey], 6)}'
+            )
+
+        lines.append("")
+        return "\n".join(lines)
 
 
 def create_metrics_router(

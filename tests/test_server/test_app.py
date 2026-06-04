@@ -187,3 +187,13 @@ async def test_cors_explicit_origin_can_keep_credentials() -> None:
     # With an explicit origin, credentials may be true.
     assert resp.headers.get("access-control-allow-origin") == "http://app.example.com"
     assert resp.headers.get("access-control-allow-credentials", "").lower() == "true"
+
+
+async def test_docs_and_redoc_disabled() -> None:
+    """P0-8: /docs and /redoc must be disabled since /openapi.json requires auth."""
+    app = await create_app(settings=_settings(api_mode="rest"))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        docs_resp = await c.get("/docs")
+        redoc_resp = await c.get("/redoc")
+    assert docs_resp.status_code == 404
+    assert redoc_resp.status_code == 404
