@@ -1,19 +1,25 @@
+from __future__ import annotations
+
 import asyncio
 import sys
+from typing import TYPE_CHECKING
 
 import uvicorn
 
 from dbzap.server.app import create_app
 
+if TYPE_CHECKING:
+    from dbzap.core.config import Settings
 
-def _load_settings():
+
+def _load_settings() -> Settings:
     try:
         from dbzap.core.config import get_settings
         return get_settings()
     except Exception as exc:
         from pydantic import ValidationError
         if isinstance(exc, ValidationError):
-            fields = ", ".join(e["loc"][0] for e in exc.errors() if e.get("loc"))
+            fields = ", ".join(str(e["loc"][0]) for e in exc.errors() if e.get("loc"))
             print(
                 f"❌ Missing required config: {fields}\n"
                 f"   Set them as environment variables or in a .env file.",
