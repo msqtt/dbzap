@@ -69,7 +69,7 @@ All settings via environment variables (or `.env` file):
 
 | Variable | Description |
 |----------|-------------|
-| `DATABASE_URL` | Database connection URL. Examples:<br>`postgresql+asyncpg://user:pass@host/db`<br>`mysql+aiomysql://user:pass@host/db`<br>`sqlite+aiosqlite:///path/to/db.sqlite` |
+| `DATABASE_URL` | Database connection URL. Examples:<br>`postgresql+asyncpg://user:pass@host/db`<br>`mysql+aiomysql://user:pass@host/db`<br>`sqlite+aiosqlite:///path/to/db.sqlite` *(SQLite requires `pip install aiosqlite`)* |
 | `JWT_SECRET_KEY` | HMAC secret for JWT token signing. Must be non-empty. |
 
 ### Optional
