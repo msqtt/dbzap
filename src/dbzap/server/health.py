@@ -122,9 +122,8 @@ def create_health_router(
 
     @router.get("/ready")
     async def readiness() -> Any:
-        from fastapi import Response
-
         import orjson
+        from fastapi import Response
 
         status_code, body = await health.readiness()
         return Response(
